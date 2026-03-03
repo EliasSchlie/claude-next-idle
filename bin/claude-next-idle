@@ -58,12 +58,14 @@ acquire_lock() {
 CACHED_PIDS=""
 CACHED_PS_EWW=""
 CACHED_LSOF=""
+CACHED_PS_CPU=""
 
 init_process_cache() {
     # pgrep -x misses processes on macOS — use ps -eo instead
     CACHED_PIDS=$(ps -eo pid=,comm= 2>/dev/null | awk '$2 == "claude" {printf "%s ", $1}') || true
     [ -z "$CACHED_PIDS" ] && return
     CACHED_PS_EWW=$(ps eww $CACHED_PIDS 2>/dev/null) || true
+    CACHED_PS_CPU=$(ps -o pid=,%cpu= $CACHED_PIDS 2>/dev/null) || true
     # Pre-filter to .claude/tasks/ lines — only data we use downstream
     CACHED_LSOF=$(lsof -p "$(echo $CACHED_PIDS | tr ' ' ',')" 2>/dev/null | grep '\.claude/tasks/' || true)
     log "cached $(echo $CACHED_PIDS | wc -w | tr -d ' ') PIDs"
@@ -100,7 +102,7 @@ is_subclaude_path() {
 
 # --- session detection ---
 
-# Build process info for matching: PID|PWD|SESSION_ID per non-sub-claude process.
+# Build process info for matching: PID|PWD|SESSION_ID|CPU per non-sub-claude process.
 # SESSION_ID is from lsof tasks/ when available, empty otherwise.
 build_process_info() {
     local subclaude_pids_file tasks_map
@@ -121,15 +123,16 @@ build_process_info() {
         if (n > 0 && arr[n] != "") print pid "|" arr[n]
     }' | sort -t'|' -k1,1 -u > "$tasks_map"
 
-    # Output: PID|PWD|SESSION_ID for each non-sub-claude process
+    # Output: PID|PWD|SESSION_ID|CPU for each non-sub-claude process
     for pid in $CACHED_PIDS; do
         grep -qxF "$pid" "$subclaude_pids_file" 2>/dev/null && continue
-        local pwd_val sid_val
+        local pwd_val sid_val cpu_val
         # Match ' PWD=' (space before P) to avoid OLDPWD which also contains 'PWD='
         pwd_val=$(echo "$CACHED_PS_EWW" | grep "^[[:space:]]*${pid} " | grep -oE '[[:space:]]PWD=[^[:space:]]+' | head -1 | sed 's/^[[:space:]]*PWD=//')
         sid_val=$(grep "^${pid}|" "$tasks_map" 2>/dev/null | head -1 | cut -d'|' -f2)
+        cpu_val=$(echo "$CACHED_PS_CPU" | awk -v p="$pid" '$1 == p {gsub(/ /,"",$2); print $2}')
         [ -z "$pwd_val" ] && continue
-        echo "${pid}|${pwd_val}|${sid_val}"
+        echo "${pid}|${pwd_val}|${sid_val}|${cpu_val}"
     done
 
     rm -f "$subclaude_pids_file" "$tasks_map"
@@ -165,8 +168,8 @@ get_sessions() {
     build_process_info > "$tmp_procs"
     log "process info:"
     if [ "$DEBUG" -eq 1 ]; then
-        while IFS='|' read -r pid pwd sid; do
-            log "  PID=$pid PWD=$pwd SID=${sid:-(none)}"
+        while IFS='|' read -r pid pwd sid cpu; do
+            log "  PID=$pid PWD=$pwd SID=${sid:-(none)} CPU=${cpu:-?}%"
         done < "$tmp_procs"
     fi
 
@@ -177,17 +180,25 @@ import sys, json, os
 from collections import defaultdict
 
 SKIP_TYPES = {"file-history-snapshot", "system", "progress", "pr-link"}
+CPU_ACTIVE_THRESHOLD = 8.0  # %CPU above which a process is considered active
 
-# Read process info: PID|PWD|SESSION_ID
+# Read process info: PID|PWD|SESSION_ID|CPU
 processes = []
+pid_cpu = {}
 with open(sys.argv[2]) as pf:
     for line in pf:
         line = line.strip()
         if not line:
             continue
-        parts = line.split("|", 2)
-        if len(parts) == 3:
-            processes.append((parts[0], parts[1], parts[2]))
+        parts = line.split("|", 3)
+        if len(parts) >= 3:
+            pid, pwd, sid = parts[0], parts[1], parts[2]
+            cpu = 0.0
+            if len(parts) > 3 and parts[3]:
+                try: cpu = float(parts[3])
+                except: pass
+            processes.append((pid, pwd, sid))
+            pid_cpu[pid] = cpu
 
 # Build session_id → pid map (precise match via lsof tasks/)
 sid_to_pid = {}
@@ -195,12 +206,15 @@ for pid, pwd, sid in processes:
     if sid:
         sid_to_pid[sid] = pid
 
-# Pool of unclaimed PIDs per CWD (for sessions without tasks/ match)
+# Pool of unclaimed PIDs per CWD, sorted by CPU ascending.
+# Idle sessions claim from the low-CPU end, processing from high-CPU end.
 claimed_pids = set(sid_to_pid.values())
 unclaimed_by_cwd = defaultdict(list)
 for pid, pwd, sid in processes:
     if pid not in claimed_pids:
         unclaimed_by_cwd[pwd].append(pid)
+for cwd in unclaimed_by_cwd:
+    unclaimed_by_cwd[cwd].sort(key=lambda p: pid_cpu.get(p, 0))
 
 # Parse all JSONL files
 sessions = []
@@ -264,21 +278,30 @@ for session_id, last_type, cwd, has_real_user, mtime in sessions:
     if not cwd or not os.path.isdir(cwd):
         continue
 
-    # Try precise match by session ID, then claim from CWD pool
-    pid = ""
-    if session_id in sid_to_pid:
-        pid = sid_to_pid[session_id]
-    elif cwd in unclaimed_by_cwd and unclaimed_by_cwd[cwd]:
-        pid = unclaimed_by_cwd[cwd].pop(0)
-    else:
-        continue  # no live process → dead session
-
+    # Determine expected status from JSONL
     if last_type == "assistant":
         status = "idle" if has_real_user else "fresh"
     elif last_type == "user":
         status = "processing" if has_real_user else "fresh"
     else:
         continue
+
+    # Try precise match by session ID, then claim from CWD pool.
+    # Pool is sorted by CPU: idle/fresh claim from low end, processing from high end.
+    pid = ""
+    if session_id in sid_to_pid:
+        pid = sid_to_pid[session_id]
+    elif cwd in unclaimed_by_cwd and unclaimed_by_cwd[cwd]:
+        pool = unclaimed_by_cwd[cwd]
+        pid = pool.pop(0) if status != "processing" else pool.pop(-1)
+    else:
+        continue  # no live process → dead session
+
+    # CPU guard: if JSONL says idle but the process is active, reclassify.
+    # Catches streaming responses (JSONL shows assistant mid-generation)
+    # and CWD pool mismatches (idle JSONL paired with processing PID).
+    if status == "idle" and pid_cpu.get(pid, 0) > CPU_ACTIVE_THRESHOLD:
+        status = "processing"
 
     print(f"{status}|{session_id}|{cwd}|{pid}|{mtime}")
 ' "$tmp_files" "$tmp_procs" > "$tmp_results" 2>/dev/null || true
