@@ -1,14 +1,31 @@
 # claude-next-idle
 
-macOS CLI tool. Cycles through idle Claude Code sessions via a LIFO stack, triggered by a Keyboard Maestro shortcut.
+macOS CLI tools for managing Claude Code sessions.
 
 ## Architecture
 
-- `bin/claude-next-idle` — single bash script, macOS-only
+- `bin/claude-next-idle` — cycles through idle Claude sessions (LIFO stack)
+- `bin/claude-open-cursor` — opens Cursor at the project dir of the active iTerm2 session
+- `km/open-cursor-from-iterm.kmmacros` — KM macro: opens Cursor from active iTerm2 session
 - State files in `~/.claude/` (idle-stack, lock dir)
 - Debug log at `~/claude-next-idle.log` (only with `--debug`)
 
+## Installation
+
+```bash
+./install.sh                            # symlinks bin/* → ~/.local/bin/
+open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group after import)
+```
+
+- `install.sh` symlinks scripts into `~/.local/bin/`. Safe to re-run. Not managed by dotfiles `deploy.sh`.
+- After importing the KM macro, enable its macro group in KM Editor.
+- Once tested, merge the logic into the existing "VS code" macro: wrap its actions in an outer "If iTerm2 is active" condition.
+
 ## Key Technical Decisions
+
+### claude-open-cursor (TTY → shell CWD → Cursor)
+- Gets the active iTerm session's TTY → parent shell CWD via `lsof -a -d cwd`
+- Opens `.code-workspace` file if one exists in the directory, otherwise opens the folder
 
 ### Session detection (JSONL-based)
 - Sessions are detected from `~/.claude/projects/**/*.jsonl` files
@@ -18,9 +35,13 @@ macOS CLI tool. Cycles through idle Claude Code sessions via a LIFO stack, trigg
 - CWD is extracted from the first 10 lines of the JSONL (early `user` type messages contain `cwd` field)
 - Single python3 call per session (combined CWD + status check) for performance
 
-### Ghost session prevention
-- Sessions with `type=user` as last entry are only counted as "processing" if they have a live claude process (verified via `lsof .claude/tasks/` mapping)
-- Without this check, closed sessions with unsent responses appear permanently stuck as "processing"
+### Closed session filtering (two layers)
+1. **Idle sessions**: Require a live claude process whose `PWD` env var matches the JSONL `cwd` (OR session ID in tasks/ via lsof)
+   - `PWD` is the shell CWD at launch time — matches the JSONL project directory
+   - Only shell-parented claude processes are checked (filters out tmux-spawned sub-claudes/workers)
+2. **Processing sessions**: Require session ID to appear in `lsof .claude/tasks/` of a running process
+   - Without this check, closed sessions with unsent responses appear permanently stuck
+- **Known limitation**: Multiple JSONL files for the same CWD (old sessions within 120-min window) all appear alive if any process matches that CWD
 
 ### Sub-claude exclusion (three layers)
 1. **Running processes**: `ps eww -p PID | grep SUB_CLAUDE=1` — checks env var on running claude processes
@@ -51,9 +72,14 @@ macOS CLI tool. Cycles through idle Claude Code sessions via a LIFO stack, trigg
 
 ### Keyboard Maestro integration
 - KM shell scripts run in minimal env — must set PATH explicitly in script
-- `open file.kmmacros` imports the macro but does NOT enable the macro group — user must enable manually
-- KM modifier values: Command=256, Shift=512, Option=2048, Control=4096
-- Hotkeys that include Ctrl+Cmd+Option may conflict with macOS system shortcuts (window management, accessibility)
+- Hotkeys with Ctrl+Cmd+Option may conflict with macOS system shortcuts
+- See [docs/keyboard-maestro.md](docs/keyboard-maestro.md) for creating `.kmmacros` files programmatically
+
+### lsof on macOS
+- **Always use `-a` flag** when combining `-d` and `-p` — without it, lsof uses OR logic (returns ALL processes with that fd type, not just the specified PID)
+- `lsof -a -d cwd -p $PID -Fn` → correctly gets CWD for a single process
+- Claude Node.js process CWD is always `/` — use parent shell's CWD or PWD env var instead
+- `lsof .claude/tasks/` approach: NOT all Claude processes have tasks/ open
 
 ### Bash 3.2 compatibility (macOS default)
 - No associative arrays (`local -A` fails)

@@ -85,14 +85,33 @@ get_live_session_ids() {
     done | grep -v '^$' | sort -u
 }
 
+# Build a set of CWDs that have a running claude process.
+# Uses the PWD env var captured at launch time (the shell CWD that spawned claude).
+# Only considers processes whose parent is a shell (filters out workers/sub-claudes).
+get_live_cwds() {
+    for pid in $(pgrep -x claude 2>/dev/null); do
+        local ppid parent_comm
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$ppid" ] || [ "$ppid" = "1" ] && continue
+        parent_comm=$(ps -o comm= -p "$ppid" 2>/dev/null)
+        case "$parent_comm" in
+            *zsh*|*bash*|*fish*|*sh) ;;
+            *) continue ;;
+        esac
+        ps eww -p "$pid" 2>/dev/null | grep -o 'PWD=[^ ]*' | head -1 | cut -d= -f2
+    done | grep -v '^$' | sort -u
+}
+
 # Classify sessions. Output format: status|session_id|cwd|mtime
 # status: idle or processing
 get_sessions() {
-    local subclaude_ids live_ids
+    local subclaude_ids live_ids live_cwds
     subclaude_ids=$(get_subclaude_ids)
     live_ids=$(get_live_session_ids)
+    live_cwds=$(get_live_cwds)
     log "sub-claude IDs to exclude: $(echo "$subclaude_ids" | tr '\n' ' ')"
     log "live session IDs: $(echo "$live_ids" | tr '\n' ' ')"
+    log "live CWDs: $(echo "$live_cwds" | tr '\n' ' ')"
 
     find "$CLAUDE_DIR" -name "*.jsonl" -mmin -"$MAX_AGE_MIN" 2>/dev/null | while read -r f; do
         local session proj_dir
@@ -141,7 +160,14 @@ print(f'{last}|{cwd}')
         mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
 
         if [ "$last_type" = "assistant" ]; then
-            status="idle"
+            # Only count as "idle" if a claude process is still running for this project
+            if echo "$live_ids" | grep -qxF "$session" 2>/dev/null || \
+               echo "$live_cwds" | grep -qxF "$cwd" 2>/dev/null; then
+                status="idle"
+            else
+                log "session $session: skipped (idle but no live process for cwd=$cwd)"
+                continue
+            fi
         elif [ "$last_type" = "user" ]; then
             # Only count as "processing" if the session is actually alive
             # (prevents ghost sessions from closed windows)
