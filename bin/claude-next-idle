@@ -8,6 +8,7 @@
 #   - When a session starts processing (user types): it leaves the stack
 #   - Sub-claude sessions are excluded (detected via SUB_CLAUDE=1 env var,
 #     meta.json session IDs, and temp directory patterns)
+#   - Fresh sessions (no user message yet) are excluded from the idle stack
 #
 # Usage:
 #   claude-next-idle              # Jump to next idle session (top of stack)
@@ -52,22 +53,43 @@ acquire_lock() {
     trap 'rm -rf "$LOCK_DIR"' EXIT
 }
 
+# --- process info cache (computed once, used by all detection functions) ---
+
+CACHED_PIDS=""
+CACHED_PS_EWW=""
+CACHED_LSOF=""
+
+init_process_cache() {
+    # pgrep -x misses processes on macOS — use ps -eo instead
+    CACHED_PIDS=$(ps -eo pid=,comm= 2>/dev/null | awk '$2 == "claude" {printf "%s ", $1}') || true
+    [ -z "$CACHED_PIDS" ] && return
+    CACHED_PS_EWW=$(ps eww $CACHED_PIDS 2>/dev/null) || true
+    CACHED_LSOF=$(lsof -p "$(echo $CACHED_PIDS | tr ' ' ',')" 2>/dev/null) || true
+    log "cached $(echo $CACHED_PIDS | wc -w | tr -d ' ') PIDs"
+}
+
 # --- sub-claude exclusion ---
 
 get_subclaude_ids() {
     {
         # 1. Running processes with SUB_CLAUDE=1 → get session ID from tasks/ dir
-        for pid in $(pgrep -x claude 2>/dev/null); do
-            ps eww -p "$pid" 2>/dev/null | grep -q "SUB_CLAUDE=1" || continue
-            lsof -p "$pid" 2>/dev/null | grep "\.claude/tasks/" | head -1 \
-                | awk '{print $NF}' | xargs basename 2>/dev/null
+        for pid in $CACHED_PIDS; do
+            echo "$CACHED_PS_EWW" | grep "^[[:space:]]*${pid} " | grep -q "SUB_CLAUDE=1" || continue
+            echo "$CACHED_LSOF" | awk -v p="$pid" '$2 == p && /\.claude\/tasks\// {print $NF; exit}' \
+                | xargs basename 2>/dev/null
         done
 
-        # 2. Session IDs from sub-claude job metadata
-        find "$SUB_CLAUDE_DIR" -name "meta.json" -path "*/jobs/*" 2>/dev/null \
-            | while read -r f; do
-                python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('claude_session_id',''))" "$f" 2>/dev/null
-            done
+        # 2. Session IDs from sub-claude job metadata (batched python3)
+        local meta_files
+        meta_files=$(find "$SUB_CLAUDE_DIR" -name "meta.json" -path "*/jobs/*" 2>/dev/null) || true
+        if [ -n "$meta_files" ]; then
+            echo "$meta_files" | xargs python3 -c "
+import json, sys
+for f in sys.argv[1:]:
+    try: print(json.load(open(f)).get('claude_session_id',''))
+    except: pass
+" 2>/dev/null
+        fi
     } | grep -v '^$' | sort -u
 }
 
@@ -77,117 +99,186 @@ is_subclaude_path() {
 
 # --- session detection ---
 
-# Build a set of session IDs that have a running claude process
-get_live_session_ids() {
-    for pid in $(pgrep -x claude 2>/dev/null); do
-        lsof -p "$pid" 2>/dev/null | grep "\.claude/tasks/" | head -1 \
-            | awk '{print $NF}' | xargs basename 2>/dev/null
-    done | grep -v '^$' | sort -u
+# Build process info for matching: PID|PWD|SESSION_ID per non-sub-claude process.
+# SESSION_ID is from lsof tasks/ when available, empty otherwise.
+build_process_info() {
+    local subclaude_pids_file tasks_map
+    subclaude_pids_file=$(mktemp)
+    tasks_map=$(mktemp)
+
+    # Identify sub-claude PIDs
+    for pid in $CACHED_PIDS; do
+        if echo "$CACHED_PS_EWW" | grep "^[[:space:]]*${pid} " | grep -q "SUB_CLAUDE=1"; then
+            echo "$pid" >> "$subclaude_pids_file"
+        fi
+    done
+
+    # Build PID→session_id from lsof tasks/
+    echo "$CACHED_LSOF" | awk '/\.claude\/tasks\// {
+        pid = $2
+        n = split($NF, arr, "/")
+        if (n > 0 && arr[n] != "") print pid "|" arr[n]
+    }' | sort -t'|' -k1,1 -u > "$tasks_map"
+
+    # Output: PID|PWD|SESSION_ID for each non-sub-claude process
+    for pid in $CACHED_PIDS; do
+        grep -qxF "$pid" "$subclaude_pids_file" 2>/dev/null && continue
+        local pwd_val sid_val
+        # Match ' PWD=' (space before P) to avoid OLDPWD which also contains 'PWD='
+        pwd_val=$(echo "$CACHED_PS_EWW" | grep "^[[:space:]]*${pid} " | grep -oE '[[:space:]]PWD=[^[:space:]]+' | head -1 | sed 's/^[[:space:]]*PWD=//')
+        sid_val=$(grep "^${pid}|" "$tasks_map" 2>/dev/null | head -1 | cut -d'|' -f2)
+        [ -z "$pwd_val" ] && continue
+        echo "${pid}|${pwd_val}|${sid_val}"
+    done
+
+    rm -f "$subclaude_pids_file" "$tasks_map"
 }
 
-# Build a set of CWDs that have a running claude process.
-# Uses the PWD env var captured at launch time (the shell CWD that spawned claude).
-# Only considers processes whose parent is a shell (filters out workers/sub-claudes).
-get_live_cwds() {
-    for pid in $(pgrep -x claude 2>/dev/null); do
-        local ppid parent_comm
-        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -z "$ppid" ] || [ "$ppid" = "1" ] && continue
-        parent_comm=$(ps -o comm= -p "$ppid" 2>/dev/null)
-        case "$parent_comm" in
-            *zsh*|*bash*|*fish*|*sh) ;;
-            *) continue ;;
-        esac
-        ps eww -p "$pid" 2>/dev/null | grep -o 'PWD=[^ ]*' | head -1 | cut -d= -f2
-    done | grep -v '^$' | sort -u
-}
-
-# Classify sessions. Output format: status|session_id|cwd|mtime
-# status: idle or processing
+# Classify sessions. Output format: status|session_id|cwd|pid|mtime
+# Each session is matched to a specific live process (by session ID or CWD pool).
+# Sessions without a matching process are excluded (dead/closed).
 get_sessions() {
-    local subclaude_ids live_ids live_cwds
+    local subclaude_ids
     subclaude_ids=$(get_subclaude_ids)
-    live_ids=$(get_live_session_ids)
-    live_cwds=$(get_live_cwds)
     log "sub-claude IDs to exclude: $(echo "$subclaude_ids" | tr '\n' ' ')"
-    log "live session IDs: $(echo "$live_ids" | tr '\n' ' ')"
-    log "live CWDs: $(echo "$live_cwds" | tr '\n' ' ')"
 
+    local tmp_files tmp_procs tmp_results
+    tmp_files=$(mktemp)
+    tmp_procs=$(mktemp)
+    tmp_results=$(mktemp)
+
+    # Collect candidate JSONL files (pre-filter agent and subclaude sessions)
     find "$CLAUDE_DIR" -name "*.jsonl" -mmin -"$MAX_AGE_MIN" 2>/dev/null | while read -r f; do
         local session proj_dir
         session=$(basename "$f" .jsonl)
         proj_dir=$(basename "$(dirname "$f")")
-
         [[ "$session" == agent-* ]] && continue
         is_subclaude_path "$proj_dir" && continue
         echo "$subclaude_ids" | grep -qxF "$session" && continue
+        echo "$f"
+    done > "$tmp_files"
 
-        # Get last meaningful message type + CWD in one python call
-        local info
-        info=$(python3 -c "
-import sys, json
-SKIP = {'file-history-snapshot', 'system', 'progress', 'pr-link'}
-cwd = ''
-last = 'unknown'
-with open(sys.argv[1]) as fh:
-    for i, line in enumerate(fh):
-        if i >= 10: break
-        try:
-            d = json.loads(line)
-            if 'cwd' in d and not cwd:
-                cwd = d['cwd']
-        except: pass
-    fh.seek(0)
-    lines = fh.readlines()
-    for line in lines[-50:]:
-        try:
-            d = json.loads(line)
-            t = d.get('type', '')
-            if t not in SKIP:
-                last = t
-        except: pass
-print(f'{last}|{cwd}')
-" "$f" 2>/dev/null)
+    log "candidate JSONL files: $(wc -l < "$tmp_files" | tr -d ' ')"
 
-        local last_type cwd
-        last_type="${info%%|*}"
-        cwd="${info#*|}"
+    # Build process info
+    build_process_info > "$tmp_procs"
+    log "process info:"
+    if [ "$DEBUG" -eq 1 ]; then
+        while IFS='|' read -r pid pwd sid; do
+            log "  PID=$pid PWD=$pwd SID=${sid:-(none)}"
+        done < "$tmp_procs"
+    fi
 
-        [ -z "$cwd" ] && continue
-        [ -d "$cwd" ] || continue
+    # Batch: parse all JSONLs + match each to a live process
+    # Python handles session→PID matching via session ID (precise) or CWD pool (heuristic)
+    python3 -c '
+import sys, json, os
+from collections import defaultdict
 
-        local mtime status
-        mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
+SKIP_TYPES = {"file-history-snapshot", "system", "progress", "pr-link"}
 
-        if [ "$last_type" = "assistant" ]; then
-            # Only count as "idle" if a claude process is still running for this project
-            if echo "$live_ids" | grep -qxF "$session" 2>/dev/null || \
-               echo "$live_cwds" | grep -qxF "$cwd" 2>/dev/null; then
-                status="idle"
-            else
-                log "session $session: skipped (idle but no live process for cwd=$cwd)"
-                continue
-            fi
-        elif [ "$last_type" = "user" ]; then
-            # Only count as "processing" if the session is actually alive
-            # (prevents ghost sessions from closed windows)
-            if echo "$live_ids" | grep -qxF "$session" 2>/dev/null; then
-                status="processing"
-            else
-                log "session $session: skipped (last=user but process dead)"
-                continue
-            fi
-        else
+# Read process info: PID|PWD|SESSION_ID
+processes = []
+with open(sys.argv[2]) as pf:
+    for line in pf:
+        line = line.strip()
+        if not line:
             continue
-        fi
+        parts = line.split("|", 2)
+        if len(parts) == 3:
+            processes.append((parts[0], parts[1], parts[2]))
 
-        log "session $session: status=$status project=$(basename "$cwd")"
-        echo "${status}|${session}|${cwd}|${mtime}"
-    done
+# Build session_id → pid map (precise match via lsof tasks/)
+sid_to_pid = {}
+for pid, pwd, sid in processes:
+    if sid:
+        sid_to_pid[sid] = pid
+
+# Pool of unclaimed PIDs per CWD (for sessions without tasks/ match)
+claimed_pids = set(sid_to_pid.values())
+unclaimed_by_cwd = defaultdict(list)
+for pid, pwd, sid in processes:
+    if pid not in claimed_pids:
+        unclaimed_by_cwd[pwd].append(pid)
+
+# Parse all JSONL files
+sessions = []
+with open(sys.argv[1]) as fl:
+    paths = [l.strip() for l in fl if l.strip()]
+
+for path in paths:
+    cwd = ""
+    last = "unknown"
+    has_real_user = False
+    try:
+        with open(path) as fh:
+            lines = fh.readlines()
+            # First 30 lines: extract cwd + check for real user messages
+            for i, line in enumerate(lines):
+                if i >= 30:
+                    break
+                try:
+                    d = json.loads(line)
+                    if "cwd" in d and not cwd:
+                        cwd = d["cwd"]
+                    if d.get("type") == "user" and not has_real_user:
+                        msg = d.get("message", {})
+                        content = msg.get("content", "") if isinstance(msg, dict) else ""
+                        if isinstance(content, list):
+                            has_real_user = True
+                        elif isinstance(content, str) and content and not content.startswith("<"):
+                            has_real_user = True
+                except:
+                    pass
+            # Last 50 lines: determine last meaningful message type
+            for line in lines[-50:]:
+                try:
+                    d = json.loads(line)
+                    t = d.get("type", "")
+                    if t not in SKIP_TYPES:
+                        last = t
+                except:
+                    pass
+    except:
+        continue
+
+    session_id = os.path.splitext(os.path.basename(path))[0]
+    mtime = int(os.path.getmtime(path))
+    sessions.append((session_id, last, cwd, has_real_user, mtime))
+
+# Match sessions to live processes (most recent JSONL gets first pick of unclaimed PIDs)
+sessions.sort(key=lambda x: -x[4])
+
+for session_id, last_type, cwd, has_real_user, mtime in sessions:
+    if not cwd or not os.path.isdir(cwd):
+        continue
+
+    # Try precise match by session ID, then claim from CWD pool
+    pid = ""
+    if session_id in sid_to_pid:
+        pid = sid_to_pid[session_id]
+    elif cwd in unclaimed_by_cwd and unclaimed_by_cwd[cwd]:
+        pid = unclaimed_by_cwd[cwd].pop(0)
+    else:
+        continue  # no live process → dead session
+
+    if last_type == "assistant":
+        status = "idle" if has_real_user else "fresh"
+    elif last_type == "user":
+        status = "processing"
+    else:
+        continue
+
+    print(f"{status}|{session_id}|{cwd}|{pid}|{mtime}")
+' "$tmp_files" "$tmp_procs" > "$tmp_results" 2>/dev/null || true
+
+    cat "$tmp_results"
+    rm -f "$tmp_files" "$tmp_procs" "$tmp_results"
 }
 
 # --- stack management ---
 
+# Stack file format: session_id|cwd|pid|mtime
 rebuild_stack() {
     local idle_sessions="$1"
     local tmp_idle tmp_stack_ids tmp_new
@@ -198,30 +289,33 @@ rebuild_stack() {
     echo "$idle_sessions" | grep -v '^$' > "$tmp_idle" || true
     log "idle sessions found: $(wc -l < "$tmp_idle" | tr -d ' ')"
 
+    # Preserve ordering of sessions already in the stack
     local kept_lines=""
     if [ -f "$STACK_FILE" ]; then
         while IFS='|' read -r sid _rest; do
             [ -z "$sid" ] && continue
-            if grep -qF "${sid}|" "$tmp_idle" 2>/dev/null; then
+            if grep -q "^${sid}|" "$tmp_idle" 2>/dev/null; then
                 local fresh_data
-                fresh_data=$(grep -F "${sid}|" "$tmp_idle" | head -1)
+                fresh_data=$(grep "^${sid}|" "$tmp_idle" | head -1)
                 kept_lines="${kept_lines}${fresh_data}"$'\n'
                 echo "$sid" >> "$tmp_stack_ids"
             fi
         done < "$STACK_FILE"
     fi
 
-    while IFS='|' read -r sid cwd mtime; do
+    # New sessions not yet in the stack
+    while IFS='|' read -r sid cwd pid mtime; do
         [ -z "$sid" ] && continue
         if ! grep -qxF "$sid" "$tmp_stack_ids" 2>/dev/null; then
-            echo "${mtime}|${sid}|${cwd}" >> "$tmp_new"
+            echo "${mtime}|${sid}|${cwd}|${pid}" >> "$tmp_new"
         fi
     done < "$tmp_idle"
 
+    # Stack = new sessions (sorted by mtime desc, at top) + existing sessions (preserved order)
     {
-        sort -t'|' -k1 -rn "$tmp_new" 2>/dev/null | while IFS='|' read -r _mtime sid cwd; do
+        sort -t'|' -k1 -rn "$tmp_new" 2>/dev/null | while IFS='|' read -r _mtime sid cwd pid; do
             [ -z "$sid" ] && continue
-            grep -F "${sid}|" "$tmp_idle" | head -1
+            grep "^${sid}|" "$tmp_idle" | head -1
         done
         printf '%s' "$kept_lines"
     } | grep -v '^$' > "$STACK_FILE" || true
@@ -234,8 +328,8 @@ rotate_to_bottom() {
     local target="$1"
     local tmp
     tmp=$(mktemp)
-    grep -vF "${target}|" "$STACK_FILE" > "$tmp" 2>/dev/null || true
-    grep -F "${target}|" "$STACK_FILE" >> "$tmp" 2>/dev/null || true
+    grep -v "^${target}|" "$STACK_FILE" > "$tmp" 2>/dev/null || true
+    grep "^${target}|" "$STACK_FILE" >> "$tmp" 2>/dev/null || true
     mv "$tmp" "$STACK_FILE"
 }
 
@@ -349,42 +443,24 @@ end run
 APPLESCRIPT
 }
 
-# Find TTY of a live claude process matching this CWD
-find_tty_for_cwd() {
-    local target_cwd="$1"
-    for pid in $(pgrep -x claude 2>/dev/null); do
-        local ppid parent_comm
-        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -z "$ppid" ] || [ "$ppid" = "1" ] && continue
-        parent_comm=$(ps -o comm= -p "$ppid" 2>/dev/null)
-        case "$parent_comm" in
-            *zsh*|*bash*|*fish*|*sh) ;;
-            *) continue ;;
-        esac
-        local pwd_val
-        pwd_val=$(ps eww -p "$pid" 2>/dev/null | grep -o 'PWD=[^ ]*' | head -1 | cut -d= -f2)
-        if [ "$pwd_val" = "$target_cwd" ]; then
-            ps -o tty= -p "$pid" 2>/dev/null | tr -d ' '
-            return
-        fi
-    done
-}
-
 navigate_to_session() {
     local cwd="$1"
+    local pid="$2"
     local project_name
     project_name=$(basename "$cwd")
 
-    # Try iTerm by TTY first (most reliable — matches exact terminal)
-    local tty
-    tty=$(find_tty_for_cwd "$cwd")
-    if [ -n "$tty" ]; then
-        log "found TTY $tty for project: $project_name"
-        local result
-        result=$(activate_iterm_by_tty "/dev/$tty")
-        if [ "$result" = "found" ]; then
-            echo "found"
-            return
+    # Try iTerm by TTY first (most reliable — matches exact terminal session)
+    if [ -n "$pid" ]; then
+        local tty
+        tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ -n "$tty" ] && [ "$tty" != "??" ]; then
+            log "found TTY $tty for PID $pid (project: $project_name)"
+            local result
+            result=$(activate_iterm_by_tty "/dev/$tty")
+            if [ "$result" = "found" ]; then
+                echo "found"
+                return
+            fi
         fi
     fi
 
@@ -430,9 +506,11 @@ APPLESCRIPT
 # --- main ---
 
 # Parse flags
+MODE=""
 for arg in "$@"; do
     case "$arg" in
-        --debug) DEBUG=1; shift ;;
+        --debug) DEBUG=1 ;;
+        --list|--count|--reset) MODE="$arg" ;;
     esac
 done
 
@@ -446,24 +524,36 @@ fi
 
 acquire_lock
 
+init_process_cache
 all_sessions=$(get_sessions)
 idle_sessions=$(echo "$all_sessions" | grep "^idle|" | sed 's/^idle|//' || true)
+fresh_sessions=$(echo "$all_sessions" | grep "^fresh|" | sed 's/^fresh|//' || true)
 processing_sessions=$(echo "$all_sessions" | grep "^processing|" | sed 's/^processing|//' || true)
 idle_count=$(echo "$idle_sessions" | grep -c '|' 2>/dev/null) || idle_count=0
+fresh_count=$(echo "$fresh_sessions" | grep -c '|' 2>/dev/null) || fresh_count=0
 processing_count=$(echo "$processing_sessions" | grep -c '|' 2>/dev/null) || processing_count=0
-log "totals: idle=$idle_count processing=$processing_count"
+log "totals: idle=$idle_count fresh=$fresh_count processing=$processing_count"
 
 rebuild_stack "$idle_sessions"
 
-case "${1:-}" in
+case "$MODE" in
     --list)
         echo "Idle (review stack):"
         pos=1
         if [ -f "$STACK_FILE" ]; then
-            while IFS='|' read -r sid cwd _mtime; do
+            # Detect duplicate project names for disambiguation
+            dup_names=$(while IFS='|' read -r _sid cwd _pid _mtime; do
+                basename "$cwd" 2>/dev/null
+            done < "$STACK_FILE" | sort | uniq -d)
+
+            while IFS='|' read -r sid cwd pid _mtime; do
                 [ -z "$sid" ] && continue
                 project=$(basename "$cwd")
-                printf "  %2d. %s\n" "$pos" "$project"
+                if echo "$dup_names" | grep -qxF "$project" 2>/dev/null; then
+                    printf "  %2d. %s (%s)\n" "$pos" "$project" "${sid:0:8}"
+                else
+                    printf "  %2d. %s\n" "$pos" "$project"
+                fi
                 pos=$((pos + 1))
             done < "$STACK_FILE"
         fi
@@ -471,12 +561,20 @@ case "${1:-}" in
         echo ""
         echo "Processing:"
         if [ "$processing_count" -gt 0 ]; then
-            echo "$processing_sessions" | while IFS='|' read -r _sid cwd _mtime; do
+            echo "$processing_sessions" | while IFS='|' read -r _sid cwd _pid _mtime; do
                 [ -z "$cwd" ] && continue
                 echo "  ⟳ $(basename "$cwd")"
             done
         else
             echo "  (none)"
+        fi
+        if [ "$fresh_count" -gt 0 ]; then
+            echo ""
+            echo "Fresh:"
+            echo "$fresh_sessions" | while IFS='|' read -r _sid cwd _pid _mtime; do
+                [ -z "$cwd" ] && continue
+                echo "  ✦ $(basename "$cwd")"
+            done
         fi
         exit 0
         ;;
@@ -500,13 +598,13 @@ if [ -z "$top" ]; then
     exit 0
 fi
 
-IFS='|' read -r sid cwd _mtime <<< "$top"
+IFS='|' read -r sid cwd pid _mtime <<< "$top"
 project=$(basename "$cwd")
-log "jumping to: $project ($sid)"
+log "jumping to: $project ($sid, PID=$pid)"
 
 rotate_to_bottom "$sid"
 
-result=$(navigate_to_session "$cwd")
+result=$(navigate_to_session "$cwd" "$pid")
 remaining=$(grep -c '|' "$STACK_FILE" 2>/dev/null) || remaining=0
 remaining=$((remaining - 1))
 

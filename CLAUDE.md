@@ -32,16 +32,16 @@ open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group af
 - Last meaningful message type determines status: `assistant` = idle, `user` = processing
 - Must skip noise types: `system`, `progress`, `file-history-snapshot`, `pr-link` — these get appended AFTER the assistant finishes
 - `tail -50` is needed because busy sessions can have many trailing noise entries
-- CWD is extracted from the first 10 lines of the JSONL (early `user` type messages contain `cwd` field)
-- Single python3 call per session (combined CWD + status check) for performance
+- CWD is extracted from the first 30 lines of the JSONL (early `user` type messages contain `cwd` field)
+- Single python3 call for ALL sessions (batched) — parses JSONLs + matches to live processes
+- Fresh sessions (no real user message) excluded: `type=user` entries with content starting with `<` are system-generated
 
-### Closed session filtering (two layers)
-1. **Idle sessions**: Require a live claude process whose `PWD` env var matches the JSONL `cwd` (OR session ID in tasks/ via lsof)
-   - `PWD` is the shell CWD at launch time — matches the JSONL project directory
-   - Only shell-parented claude processes are checked (filters out tmux-spawned sub-claudes/workers)
-2. **Processing sessions**: Require session ID to appear in `lsof .claude/tasks/` of a running process
-   - Without this check, closed sessions with unsent responses appear permanently stuck
-- **Known limitation**: Multiple JSONL files for the same CWD (old sessions within 120-min window) all appear alive if any process matches that CWD
+### Closed session filtering (session→process matching)
+- Each JSONL is matched to a specific live claude process via two methods:
+  1. **Session ID match**: `lsof tasks/` gives session UUID → precise PID mapping
+  2. **CWD pool matching**: Group processes by PWD, group JSONLs by `cwd` field. For each CWD, the N most recent JSONLs get the N available processes (by mtime descending). Excess JSONLs = dead sessions.
+- Sessions without a matching live process are excluded (dead/closed)
+- **Multiple sessions in same directory**: Fully supported. Each gets its own process from the CWD pool.
 
 ### Sub-claude exclusion (three layers)
 1. **Running processes**: `ps eww -p PID | grep SUB_CLAUDE=1` — checks env var on running claude processes
@@ -75,11 +75,22 @@ open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group af
 - Hotkeys with Ctrl+Cmd+Option may conflict with macOS system shortcuts
 - See [docs/keyboard-maestro.md](docs/keyboard-maestro.md) for creating `.kmmacros` files programmatically
 
+### pgrep on macOS is unreliable
+- `pgrep -x claude` silently misses some processes — verified with 13 processes, pgrep returned only 12
+- **Use `ps -eo pid=,comm= | awk '$2 == "claude"'` instead** — reliable across all processes
+- No known workaround for pgrep; the miss is consistent and reproducible
+
+### PWD extraction from `ps eww` output
+- `grep -o 'PWD=[^ ]*'` matches OLDPWD too! `OLDPWD=/Users/mee` contains substring `PWD=/Users/mee`
+- **Use `grep -oE '[[:space:]]PWD=[^[:space:]]+'`** — requires space before PWD, excluding OLDPWD
+- PWD may not match the JSONL project directory if claude determines the project independently of launch CWD (e.g., session resume from a different directory)
+
 ### lsof on macOS
 - **Always use `-a` flag** when combining `-d` and `-p` — without it, lsof uses OR logic (returns ALL processes with that fd type, not just the specified PID)
 - `lsof -a -d cwd -p $PID -Fn` → correctly gets CWD for a single process
 - Claude Node.js process CWD is always `/` — use parent shell's CWD or PWD env var instead
 - `lsof .claude/tasks/` approach: NOT all Claude processes have tasks/ open
+- JSONL files are opened/closed per write — cannot use lsof to catch PID→JSONL mapping
 
 ### Bash 3.2 compatibility (macOS default)
 - No associative arrays (`local -A` fails)
@@ -92,6 +103,8 @@ open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group af
 - **No terminal-tab-level navigation in Cursor** — raises the correct window but can't select the right terminal tab within it
 - **Streaming responses appear idle** — during active generation, JSONL shows `type=assistant`, making the session look idle momentarily
 - **iTerm session matching** — matches by project name in session title; if Claude doesn't set the terminal title to include the project name, matching may fail
+- **Same-CWD navigation imprecision** — when multiple sessions share a CWD, the PID→JSONL pairing within that CWD is heuristic (by mtime). Navigation may land on the wrong terminal of the same project; cycling fixes this.
+- **Post-/clear sessions** — after `/clear`, the JSONL still contains old real-user messages, so the session appears idle (not fresh). Needs a `/clear` marker detection to fix.
 
 ## Future: VS Code Extension
 The only reliable way to switch terminal tabs in Cursor is a VS Code extension that:
