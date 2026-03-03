@@ -60,12 +60,21 @@ Each JSONL must be matched to a specific live claude process to confirm the sess
 
 When session ID matching fails, fall back to CWD-based pool matching:
 
-1. Group processes by `PWD` env var
+1. Group processes by `PWD` env var, collect CPU usage per PID
 2. Group JSONLs by `cwd` field
-3. For each CWD, the N most recent JSONLs (by mtime) claim the N available processes
-4. Excess JSONLs = dead sessions, excluded
+3. Sort the PID pool per CWD by CPU usage (ascending)
+4. Idle/fresh sessions claim from the **low-CPU end**, processing sessions claim from the **high-CPU end**
+5. For each CWD, the N most recent JSONLs (by mtime) claim the N available processes
+6. Excess JSONLs = dead sessions, excluded
 
-This handles **multiple sessions in the same directory**: if 3 processes have PWD=/path/to/project and 5 JSONLs have cwd=/path/to/project, the 3 most recently modified JSONLs are considered alive.
+This handles **multiple sessions in the same directory**: if 3 processes have PWD=/path/to/project and 5 JSONLs have cwd=/path/to/project, the 3 most recently modified JSONLs are considered alive. CPU-aware sorting improves PID↔JSONL pairing accuracy (idle process ↔ idle JSONL).
+
+### CPU Guard
+
+After PID matching, a secondary check prevents navigation to active processes:
+
+- If a session is classified as **idle** (JSONL shows `type=assistant`) but its matched PID has **>8% CPU**, it's reclassified as **processing**
+- Catches **streaming responses** (JSONL shows assistant mid-generation) and residual **CWD pool mismatches**
 
 ### Process Discovery
 

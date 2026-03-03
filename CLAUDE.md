@@ -48,6 +48,6 @@ Three layers: `SUB_CLAUDE=1` env var, `meta.json` session IDs, and `-tmp-`/`tmp.
 ## Known Limitations
 
 - **No terminal-tab-level navigation in Cursor** — raises the correct window but can't select terminal tabs
-- **Streaming responses appear idle** — during generation, JSONL shows `type=assistant` momentarily
-- **Same-CWD navigation imprecision** — PID→JSONL pairing is heuristic; cycling fixes mismatches
+- **Streaming responses** — during generation, JSONL shows `type=assistant` momentarily; CPU guard (>8%) catches most cases
+- **Same-CWD navigation imprecision** — CPU-sorted pool matching helps, but PID→JSONL pairing remains heuristic
 - **Post-/clear stale JSONL** — old JSONL retains messages; appears idle until its process exits
