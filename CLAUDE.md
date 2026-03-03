@@ -15,10 +15,12 @@ A keyboard shortcut that always brings you to the next Claude Code session waiti
 ## Installation
 
 ```bash
-./install.sh    # symlinks bin/ → ~/.local/bin/, copies plugin → ~/.local/share/
-```
+# Plugin (hooks) — via marketplace
+claude plugin install claude-next-idle@elias-tools
 
-Then add hooks to `~/.claude/settings.json` (see `hooks/hooks.json`).
+# CLI tools
+./install.sh    # symlinks bin/* → ~/.local/bin/
+```
 
 ## Key Technical Decisions
 
