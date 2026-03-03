@@ -22,6 +22,15 @@ claude plugin install claude-next-idle@elias-tools
 ./install.sh    # symlinks bin/* → ~/.local/bin/
 ```
 
+## Releasing
+
+After pushing changes, bump the version in **both** places for auto-update:
+
+1. `.claude-plugin/plugin.json` — `version` field (in this repo)
+2. `EliasSchlie/claude-plugins` marketplace — `version` in `.claude-plugin/marketplace.json`
+
+Push both repos. The marketplace has `autoUpdate: true`, so new sessions pick up the new version automatically.
+
 ## Key Technical Decisions
 
 ### Hook-based idle detection
