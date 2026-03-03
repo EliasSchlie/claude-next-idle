@@ -42,6 +42,7 @@ PID → TTY → iTerm AppleScript (primary). Fallback: project-name matching in 
 - **iTerm AppleScript** — match sessions by TTY (`tty of s`), not by name. See [docs/applescript.md](docs/applescript.md#iterm-applescript).
 - **`pgrep` is unreliable on macOS** — use `ps -eo pid=,comm=` instead. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#pgrep-is-unreliable).
 - **`grep -o 'PWD=...'` matches OLDPWD** — use `[[:space:]]PWD=` pattern. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#pwd-extraction-from-ps-eww).
+- **Hooks get `$PPID` set to the claude process** — don't walk the process tree; child `claude` processes exist and `find_claude_pid()` will stop at the wrong one.
 - **Bash 3.2** — no associative arrays, no `trap RETURN`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#bash-32-compatibility).
 - **Keyboard Maestro** — `.kmmacros` must be wrapped in a MacroGroup. See [docs/keyboard-maestro.md](docs/keyboard-maestro.md).
 
