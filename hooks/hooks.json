@@ -55,6 +55,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/idle-signal.sh clear",
+            "async": true
+          }
+        ]
+      }
     ]
   }
 }

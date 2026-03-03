@@ -7,7 +7,7 @@ A keyboard shortcut that always brings you to the next Claude Code session waiti
 ## Architecture
 
 - `hooks/idle-signal.sh` — hook script that writes/clears signal files when sessions become idle/active
-- `hooks/hooks.json` — Claude Code hook configuration (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit)
+- `hooks/hooks.json` — Claude Code hook configuration (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, SessionStart)
 - `bin/claude-next-idle` — reads signal files, maintains LIFO stack, navigates to top session
 - State: `~/.claude/idle-signals/<pid>` (hook-written), `~/.claude/idle-stack` (stack ordering)
 - Debug log at `~/claude-next-idle.log` (only with `--debug`)
@@ -39,6 +39,9 @@ Hooks fire on lifecycle events to write/clear signal files (`~/.claude/idle-sign
 ### Block detection
 Stop hook waits 1s then checks if the JSONL transcript was modified — if so, another hook blocked and the session continued (not idle). Signal is removed.
 
+### Cleared-session exclusion
+`/clear` does NOT trigger `UserPromptSubmit` — it triggers `SessionStart` with source `clear`. A `SessionStart` hook with matcher `clear` clears the signal so cleared sessions don't appear idle.
+
 ### Sub-claude exclusion
 Hook checks `SUB_CLAUDE=1` env var and exits early. No sub-claude session ever writes a signal.
 
@@ -53,6 +56,7 @@ PID → TTY → iTerm AppleScript (primary). Fallback: project-name matching in 
 - **`grep -o 'PWD=...'` matches OLDPWD** — use `[[:space:]]PWD=` pattern. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#pwd-extraction-from-ps-eww).
 - **Never modify `~/.claude/` directly** — plugin cache, `installed_plugins.json`, settings are all managed by Claude Code. Only change Git repos and let auto-update handle deployment.
 - **Hooks get `$PPID` set to the claude process** — don't walk the process tree; child `claude` processes exist and `find_claude_pid()` will stop at the wrong one.
+- **`/clear` fires `SessionStart`, not `UserPromptSubmit`** — slash commands like `/clear` are lifecycle events, not prompt submissions. Use `SessionStart` hook with appropriate matcher.
 - **Bash 3.2** — no associative arrays, no `trap RETURN`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#bash-32-compatibility).
 - **Keyboard Maestro** — `.kmmacros` must be wrapped in a MacroGroup. See [docs/keyboard-maestro.md](docs/keyboard-maestro.md).
 

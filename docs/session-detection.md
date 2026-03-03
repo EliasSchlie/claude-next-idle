@@ -25,8 +25,11 @@ Format: `{"cwd":"...","session_id":"...","transcript":"...","ts":...,"trigger":"
 | `PermissionRequest` | Write signal | Claude requesting tool permission |
 | `PostToolUse` | Clear signal | Claude continuing to process |
 | `UserPromptSubmit` | Clear signal | User sent a new message |
+| `SessionStart` (clear) | Clear signal | User ran `/clear` |
 
 All hooks are async. The hook script (`hooks/idle-signal.sh`) finds the ancestor `claude` process by walking up the PPID chain.
+
+Note: `/clear` does NOT trigger `UserPromptSubmit` — it triggers `SessionStart` with source `clear`.
 
 ### Block Detection
 
