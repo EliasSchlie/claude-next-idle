@@ -62,7 +62,9 @@ git -C "$REPO_DIR" commit -m "Release v$new"
 git -C "$REPO_DIR" push
 echo "  Pushed claude-next-idle"
 
-# --- bump marketplace ---
+# --- bump marketplace (sync with remote first) ---
+
+git -C "$MARKETPLACE_DIR" pull --rebase origin main
 
 python3 -c "
 import json
