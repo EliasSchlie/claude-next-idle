@@ -6,28 +6,33 @@ A keyboard shortcut that always brings you to the next Claude Code session waiti
 
 ## Architecture
 
-- `bin/claude-next-idle` — cycles through idle Claude sessions (LIFO stack)
-- State files in `~/.claude/` (idle-stack, lock dir)
+- `hooks/idle-signal.sh` — hook script that writes/clears signal files when sessions become idle/active
+- `hooks/hooks.json` — Claude Code hook configuration (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit)
+- `bin/claude-next-idle` — reads signal files, maintains LIFO stack, navigates to top session
+- State: `~/.claude/idle-signals/<pid>` (hook-written), `~/.claude/idle-stack` (stack ordering)
 - Debug log at `~/claude-next-idle.log` (only with `--debug`)
 
 ## Installation
 
 ```bash
-./install.sh    # symlinks bin/* → ~/.local/bin/
+./install.sh    # symlinks bin/ → ~/.local/bin/, copies plugin → ~/.local/share/
 ```
 
-- `install.sh` symlinks scripts into `~/.local/bin/`. Safe to re-run. Not managed by dotfiles `deploy.sh`.
+Then add hooks to `~/.claude/settings.json` (see `hooks/hooks.json`).
 
 ## Key Technical Decisions
 
-### Session detection
-Sessions from `~/.claude/projects/**/*.jsonl`, classified by last meaningful message type (`assistant` = idle, `user` = processing). Fresh sessions (no real user messages) excluded. See [docs/session-detection.md](docs/session-detection.md).
+### Hook-based idle detection
+Hooks fire on lifecycle events to write/clear signal files (`~/.claude/idle-signals/<pid>`). No JSONL parsing needed. See [docs/session-detection.md](docs/session-detection.md).
 
-### Process matching
-Each JSONL matched to a specific live process via session ID (precise) or CWD pool (heuristic). Multiple sessions in same directory fully supported. See [docs/session-detection.md](docs/session-detection.md#process-matching).
+### Block detection
+Stop hook waits 1s then checks if the JSONL transcript was modified — if so, another hook blocked and the session continued (not idle). Signal is removed.
 
 ### Sub-claude exclusion
-Three layers: `SUB_CLAUDE=1` env var, `meta.json` session IDs, and `-tmp-`/`tmp.` path patterns. See [docs/session-detection.md](docs/session-detection.md#sub-claude-exclusion).
+Hook checks `SUB_CLAUDE=1` env var and exits early. No sub-claude session ever writes a signal.
+
+### Navigation
+PID → TTY → iTerm AppleScript (primary). Fallback: project-name matching in window titles. See [docs/applescript.md](docs/applescript.md).
 
 ## Hard-Learned Rules
 
@@ -35,14 +40,10 @@ Three layers: `SUB_CLAUDE=1` env var, `meta.json` session IDs, and `-tmp-`/`tmp.
 - **iTerm AppleScript** — match sessions by TTY (`tty of s`), not by name. See [docs/applescript.md](docs/applescript.md#iterm-applescript).
 - **`pgrep` is unreliable on macOS** — use `ps -eo pid=,comm=` instead. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#pgrep-is-unreliable).
 - **`grep -o 'PWD=...'` matches OLDPWD** — use `[[:space:]]PWD=` pattern. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#pwd-extraction-from-ps-eww).
-- **`lsof` needs `-a` flag** for AND logic when combining `-d` and `-p`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#lsof-gotchas).
 - **Bash 3.2** — no associative arrays, no `trap RETURN`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#bash-32-compatibility).
 - **Keyboard Maestro** — `.kmmacros` must be wrapped in a MacroGroup. See [docs/keyboard-maestro.md](docs/keyboard-maestro.md).
-
 
 ## Known Limitations
 
 - **No terminal-tab-level navigation in Cursor** — raises the correct window but can't select terminal tabs
-- **Streaming responses** — during generation, JSONL shows `type=assistant` momentarily; CPU guard (>8%) catches most cases
-- **Same-CWD navigation imprecision** — CPU-sorted pool matching helps, but PID→JSONL pairing remains heuristic
-- **Post-/clear stale JSONL** — old JSONL retains messages; appears idle until its process exits
+- **Block detection latency** — Stop hook waits 1s to verify, so there's a brief window where a session appears idle before block detection completes

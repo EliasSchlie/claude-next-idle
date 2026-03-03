@@ -1,112 +1,63 @@
-# Session Detection & Process Matching
+# Session Detection
 
-How `claude-next-idle` discovers, classifies, and matches Claude Code sessions to live processes.
+How `claude-next-idle` detects idle sessions using Claude Code hooks.
 
-## JSONL-Based Session Discovery
+## Hook-Based Detection
 
-Sessions are detected from `~/.claude/projects/**/*.jsonl` files modified within the last 120 minutes.
+Idle state is tracked via **signal files** written by hooks, not by parsing JSONL transcripts.
 
-### JSONL Structure
+### Signal Files
 
-Each line is a JSON object with a `type` field. Key types:
+Location: `~/.claude/idle-signals/<claude-pid>`
 
-| Type | Meaning |
-|------|---------|
-| `user` | User message (or system-generated pseudo-user message) |
-| `assistant` | Claude's response |
-| `system` | System message (noise) |
-| `progress` | Streaming progress (noise) |
-| `file-history-snapshot` | File tracking (noise) |
-| `pr-link` | PR link (noise) |
+Format: `{"cwd":"...","session_id":"...","transcript":"...","ts":...,"trigger":"..."}`
 
-Noise types get appended AFTER the assistant finishes responding, so they must be skipped when determining the last meaningful message type.
+- **Written** when a session becomes idle (waiting for user input)
+- **Cleared** when a session starts processing again
+- **Stale signals** (dead PIDs) are cleaned up by `bin/claude-next-idle` on each run
 
-### Status Classification
+### Hooks
 
-The last meaningful message type + real-user presence determines status:
+| Event | Action | Trigger |
+|-------|--------|---------|
+| `Stop` | Write signal | Claude finished responding |
+| `PreToolUse` (AskUserQuestion\|ExitPlanMode) | Write signal | Claude asking user a question or presenting a plan |
+| `PermissionRequest` | Write signal | Claude requesting tool permission |
+| `PostToolUse` | Clear signal | Claude continuing to process |
+| `UserPromptSubmit` | Clear signal | User sent a new message |
 
-- `assistant` + has real user → **idle** (Claude responded, waiting for user)
-- `assistant` + no real user → **fresh** (new or cleared session, excluded from stack)
-- `user` + has real user → **processing** (user sent message, Claude working)
-- `user` + no real user → **fresh** (e.g., right after `/clear` before first real message)
+All hooks are async. The hook script (`hooks/idle-signal.sh`) finds the ancestor `claude` process by walking up the PPID chain.
 
-### CWD Extraction
+### Block Detection
 
-The `cwd` field appears in early JSONL entries (first 30 lines). It tracks Claude's current working directory and updates when Claude `cd`s.
+When a `Stop` hook fires, the session might not actually be idle — another hook (e.g., a lint hook) may have blocked the response, causing Claude to continue. Detection:
 
-### Fresh Session Detection
+1. Write signal file immediately
+2. Record the JSONL transcript's mtime
+3. Sleep 1 second
+4. If the signal was already cleared (by PostToolUse/UserPromptSubmit), stop
+5. Compare transcript mtime — if it increased, the session continued → remove signal
 
-A session is "fresh" if it has no real user messages. System-generated `type=user` entries have content starting with `<` (e.g., `<local-command-caveat>`, `<command-name>`). These are filtered out — only entries with content NOT starting with `<` (or content that is a list) count as real user messages.
+### Sub-Claude Exclusion
 
-Fresh sessions are excluded from the idle rotation stack.
+`SUB_CLAUDE=1` env var is checked at the top of `idle-signal.sh`. Sub-claude processes never write signals.
 
-### `/clear` Handling
+## Processing Session Detection
 
-`/clear` creates a **new JSONL** file. The old file retains all messages but loses its live process (same PID now writes to the new file). The new file starts with only system-generated `type=user` entries (`<command-name>/clear</command-name>`, etc.), so `has_real_user` is false → status is **fresh** until the user sends their first real message.
+Processing sessions are found at query time by `bin/claude-next-idle`:
 
-## Process Matching
-
-Each JSONL must be matched to a specific live claude process to confirm the session is alive. Two methods, tried in order:
-
-### 1. Session ID Match (Precise)
-
-`lsof -p PID | grep .claude/tasks/` → the directory basename is the session UUID.
-
-- Gives exact PID → session ID mapping
-- **NOT all processes have tasks/ open** — only those with active task tracking
-- Cannot use `lsof | grep .jsonl` — files are opened/closed per write, not kept open
-
-### 2. CWD Pool Match (Heuristic)
-
-When session ID matching fails, fall back to CWD-based pool matching:
-
-1. Group processes by `PWD` env var, collect CPU usage per PID
-2. Group JSONLs by `cwd` field
-3. Sort the PID pool per CWD by CPU usage (ascending)
-4. Idle/fresh sessions claim from the **low-CPU end**, processing sessions claim from the **high-CPU end**
-5. For each CWD, the N most recent JSONLs (by mtime) claim the N available processes
-6. Excess JSONLs = dead sessions, excluded
-
-This handles **multiple sessions in the same directory**: if 3 processes have PWD=/path/to/project and 5 JSONLs have cwd=/path/to/project, the 3 most recently modified JSONLs are considered alive. CPU-aware sorting improves PID↔JSONL pairing accuracy (idle process ↔ idle JSONL).
-
-### CPU Guard
-
-After PID matching, a secondary check prevents navigation to active processes:
-
-- If a session is classified as **idle** (JSONL shows `type=assistant`) but its matched PID has **>8% CPU**, it's reclassified as **processing**
-- Catches **streaming responses** (JSONL shows assistant mid-generation) and residual **CWD pool mismatches**
-
-### Process Discovery
-
-All non-sub-claude `claude` processes are found via `ps -eo pid=,comm=`. See [macOS pitfalls](macos-pitfalls.md#pgrep-is-unreliable) for why `pgrep` is not used.
-
-## Sub-Claude Exclusion
-
-Three layers filter out sub-claude worker processes:
-
-1. **Environment variable**: `ps eww -p PID | grep SUB_CLAUDE=1` on running processes
-2. **Job metadata**: `~/.sub-claude/pools/*/jobs/*/meta.json` → `claude_session_id` field
-3. **Path pattern**: JSONL project dirs containing `-tmp-` or `tmp.` (worktree sessions)
-
-Layers 1+2 catch sub-claude agents in real project dirs; layer 3 catches worktree-based agents.
-
-## Pre-Filtering
-
-Before classification, these sessions are excluded:
-- `agent-*` session IDs (subagent sessions)
-- Sessions in project dirs matching sub-claude path patterns
-- Sessions whose ID appears in the sub-claude exclusion set
+1. Find all alive `claude` PIDs via `ps -eo pid=,comm=`
+2. Exclude PIDs with `SUB_CLAUDE=1` in their environment (`ps eww`)
+3. Exclude PIDs that have signal files (idle)
+4. Remaining PIDs = processing sessions
+5. CWD extracted from `PWD=` in the process environment
 
 ## Navigation
 
-After matching, each session has a PID. Navigation uses PID → TTY → iTerm AppleScript:
+Each idle session has a PID from the signal file name. Navigation:
 
-1. `ps -o tty= -p PID` → get the terminal device (e.g., `ttys014`)
-2. iTerm AppleScript iterates all sessions, matches by `tty of s`
-3. Brings that window to front and selects the tab/session
+1. `ps -o tty= -p PID` → get terminal device (e.g., `ttys014`)
+2. iTerm AppleScript matches by `tty of s` → selects window/tab/session
+3. Fallback: project-name matching in iTerm session names or Cursor window titles
 
-Fallback: project-name matching in iTerm session titles or Cursor window titles.
-
-### Same-CWD Navigation Imprecision
-
-When multiple sessions share a CWD, the PID-to-JSONL pairing within that CWD is heuristic (by mtime). Navigation may land on the wrong terminal of the same project. Cycling through the stack visits all sessions eventually.
+See [applescript.md](applescript.md) for iTerm/Cursor navigation details.
