@@ -64,7 +64,8 @@ init_process_cache() {
     CACHED_PIDS=$(ps -eo pid=,comm= 2>/dev/null | awk '$2 == "claude" {printf "%s ", $1}') || true
     [ -z "$CACHED_PIDS" ] && return
     CACHED_PS_EWW=$(ps eww $CACHED_PIDS 2>/dev/null) || true
-    CACHED_LSOF=$(lsof -p "$(echo $CACHED_PIDS | tr ' ' ',')" 2>/dev/null) || true
+    # Pre-filter to .claude/tasks/ lines — only data we use downstream
+    CACHED_LSOF=$(lsof -p "$(echo $CACHED_PIDS | tr ' ' ',')" 2>/dev/null | grep '\.claude/tasks/' || true)
     log "cached $(echo $CACHED_PIDS | wc -w | tr -d ' ') PIDs"
 }
 
@@ -211,14 +212,18 @@ for path in paths:
     last = "unknown"
     has_real_user = False
     try:
-        with open(path) as fh:
-            lines = fh.readlines()
-            # First 30 lines: extract cwd + check for real user messages
-            for i, line in enumerate(lines):
-                if i >= 30:
+        with open(path, "rb") as fh:
+            # First 30 lines: extract cwd + check for real user messages.
+            # NOTE: /clear creates a new JSONL, so a cleared session has no real
+            # user messages in its first 30 lines. If /clear ever stops creating
+            # a new file, this assumption breaks and we would need to scan for
+            # clear markers to reset has_real_user.
+            for i in range(30):
+                raw = fh.readline()
+                if not raw:
                     break
                 try:
-                    d = json.loads(line)
+                    d = json.loads(raw)
                     if "cwd" in d and not cwd:
                         cwd = d["cwd"]
                     if d.get("type") == "user" and not has_real_user:
@@ -230,13 +235,19 @@ for path in paths:
                             has_real_user = True
                 except:
                     pass
-            # Last 50 lines: determine last meaningful message type
-            for line in lines[-50:]:
+            # Seek to tail to find last meaningful message type.
+            # Scanning backwards avoids reading entire file (can be several MB).
+            fh.seek(0, 2)
+            size = fh.tell()
+            tail_start = max(0, size - 262144)
+            fh.seek(tail_start)
+            for line in reversed(fh.read().decode("utf-8", errors="replace").splitlines()):
                 try:
                     d = json.loads(line)
                     t = d.get("type", "")
                     if t not in SKIP_TYPES:
                         last = t
+                        break
                 except:
                     pass
     except:
