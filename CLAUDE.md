@@ -57,6 +57,7 @@ PID → TTY → iTerm AppleScript (primary). Fallback: project-name matching in 
 - **Never modify `~/.claude/` directly** — plugin cache, `installed_plugins.json`, settings are all managed by Claude Code. Only change Git repos and let auto-update handle deployment.
 - **Hooks get `$PPID` set to the claude process** — don't walk the process tree; child `claude` processes exist and `find_claude_pid()` will stop at the wrong one.
 - **`/clear` fires `SessionStart`, not `UserPromptSubmit`** — slash commands like `/clear` are lifecycle events, not prompt submissions. Use `SessionStart` hook with appropriate matcher.
+- **Async hooks omit trailing newline on stdin** — Claude Code writes JSON without `\n` for async hooks. Bash `read` returns exit code 1 on EOF without newline even though it captures the data. Always use `read ... || true`.
 - **Bash 3.2** — no associative arrays, no `trap RETURN`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#bash-32-compatibility).
 - **Keyboard Maestro** — `.kmmacros` must be wrapped in a MacroGroup. See [docs/keyboard-maestro.md](docs/keyboard-maestro.md).
 
