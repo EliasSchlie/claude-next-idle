@@ -33,9 +33,13 @@ if [ ! -d "$MARKETPLACE_DIR/.git" ]; then
     exit 1
 fi
 
-# Ensure both repos are clean
+# Ensure both repos are clean and pushed
 if ! git -C "$REPO_DIR" diff --quiet 2>/dev/null; then
     echo "Error: claude-next-idle has uncommitted changes. Commit first."
+    exit 1
+fi
+if ! git -C "$REPO_DIR" diff origin/main --quiet 2>/dev/null; then
+    echo "Error: claude-next-idle has unpushed commits. Push first."
     exit 1
 fi
 if ! git -C "$MARKETPLACE_DIR" diff --quiet 2>/dev/null; then
