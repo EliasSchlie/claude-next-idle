@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Opens Cursor at the current working directory of the Claude session
-# running in the frontmost iTerm window.
+# Opens Cursor at the project of the Claude session running in the
+# frontmost iTerm window.
 #
 # How it works:
 #   1. Gets the TTY of the active iTerm session via AppleScript
-#   2. Gets parent shell CWD → encodes to find JSONL project dir
-#   3. Reads the last `cwd` field from the most recent JSONL (tracks cd)
-#   4. Falls back to parent shell CWD if no JSONL match
-#   5. Opens Cursor there (reuses existing window if available)
+#   2. Finds the Claude process on that TTY → gets its CWD (= project root)
+#   3. Falls back to parent shell CWD if no Claude process found
+#   4. Opens Cursor there (workspace file if available, otherwise folder)
 #
 # Usage:
 #   claude-open-cursor           # Open Cursor at Claude's current dir
@@ -18,7 +17,6 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
 LOG_FILE="$HOME/claude-next-idle.log"
-CLAUDE_DIR="$HOME/.claude/projects"
 DEBUG=0
 
 for arg in "$@"; do
@@ -47,51 +45,30 @@ fi
 tty_name="${tty_path##*/}"
 log "TTY: $tty_path ($tty_name)"
 
-# 2. Get the parent shell's CWD (= project root where claude was launched)
-shell_pid=$(ps -t "$tty_name" -o pid=,comm= 2>/dev/null \
-    | awk '$2 ~ /^-?(bash|zsh|sh|fish)$/ {print $1; exit}')
+# 2. Get project directory from the Claude process on this TTY
+#    Claude's process CWD = the directory where it was launched = project root.
+#    This is reliable because Bash tool calls run in subprocesses and don't
+#    change the parent Claude process's CWD.
+claude_pid=$(ps -t "$tty_name" -o pid=,comm= 2>/dev/null \
+    | awk '$2 == "claude" {print $1; exit}')
+log "Claude PID: ${claude_pid:-(not found)}"
 
-shell_cwd=""
-if [ -n "$shell_pid" ]; then
-    shell_cwd=$(lsof -a -p "$shell_pid" -d cwd -F n 2>/dev/null \
-        | awk '/^n/{print substr($0,2)}')
-    log "Shell CWD: $shell_cwd"
-fi
-
-# 3. Try to get Claude's live CWD from the session JSONL
-#    Project path encodes as: /Users/me/proj → -Users-me-proj
 cwd=""
-if [ -n "$shell_cwd" ]; then
-    encoded_path=$(echo "$shell_cwd" | tr '/' '-')
-    proj_dir="$CLAUDE_DIR/$encoded_path"
-
-    if [ -d "$proj_dir" ]; then
-        # Find the most recently modified JSONL in this project dir
-        jsonl=$(ls -t "$proj_dir"/*.jsonl 2>/dev/null | head -1)
-
-        if [ -n "$jsonl" ]; then
-            log "JSONL: $jsonl"
-            cwd=$(tail -100 "$jsonl" | python3 -c "
-import sys, json
-cwd = ''
-for line in sys.stdin:
-    try:
-        c = json.loads(line).get('cwd', '')
-        if c:
-            cwd = c
-    except:
-        pass
-print(cwd)
-" 2>/dev/null)
-            log "JSONL CWD: $cwd"
-        fi
-    fi
+if [ -n "$claude_pid" ]; then
+    cwd=$(lsof -a -p "$claude_pid" -d cwd -F n 2>/dev/null \
+        | awk '/^n/{print substr($0,2)}')
+    log "Claude CWD: $cwd"
 fi
 
-# 4. Fallback to shell CWD if JSONL approach failed
+# 3. Fallback: parent shell's CWD
 if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then
-    cwd="$shell_cwd"
-    log "Fallback to shell CWD: $cwd"
+    shell_pid=$(ps -t "$tty_name" -o pid=,comm= 2>/dev/null \
+        | awk '$2 ~ /^-?(bash|zsh|sh|fish)$/ {print $1; exit}')
+    if [ -n "$shell_pid" ]; then
+        cwd=$(lsof -a -p "$shell_pid" -d cwd -F n 2>/dev/null \
+            | awk '/^n/{print substr($0,2)}')
+        log "Fallback to shell CWD: $cwd"
+    fi
 fi
 
 if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then
@@ -99,15 +76,26 @@ if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then
     exit 1
 fi
 
-# 5. Open in Cursor — check for matching workspace, then in-folder, then plain folder
+# 4. Open in Cursor — check for matching workspace, then in-folder, then plain folder
 WORKSPACE_DIR="$HOME/Documents/Projects/VS code workspaces"
 project_name=$(basename "$cwd")
+
+# Home directory → dotfiles workspace
+if [ "$cwd" = "$HOME" ]; then
+    project_name="dotfiles"
+fi
+
+# Use open -a instead of cursor CLI — the cursor CLI uses eval internally
+# which breaks paths containing spaces (e.g. "VS code workspaces/...")
+open_cursor() {
+    open -a "Cursor" "$1"
+}
 
 # First: workspace file matching the project name
 workspace="${WORKSPACE_DIR}/${project_name}.code-workspace"
 if [ -f "$workspace" ]; then
     log "Opening workspace: $workspace"
-    cursor "$workspace"
+    open_cursor "$workspace"
     exit 0
 fi
 
@@ -115,10 +103,10 @@ fi
 local_workspace=$(find "$cwd" -maxdepth 1 -name "*.code-workspace" -print -quit 2>/dev/null) || true
 if [ -n "$local_workspace" ]; then
     log "Opening local workspace: $local_workspace"
-    cursor "$local_workspace"
+    open_cursor "$local_workspace"
     exit 0
 fi
 
 # Third: just open the folder
 log "Opening folder: $cwd"
-cursor "$cwd"
+open_cursor "$cwd"

@@ -1,6 +1,8 @@
 # claude-next-idle
 
-macOS CLI tools for managing Claude Code sessions.
+## Goal
+
+A keyboard shortcut that always brings you to the next Claude Code session waiting for your input. Each press cycles to the next one (LIFO — most recently finished first). Entering a session moves it to the back of the queue. Only truly idle sessions qualify: no fresh/unstarted sessions, no cleared sessions, no sessions still processing, no sessions whose terminal has been closed.
 
 ## Architecture
 
@@ -24,7 +26,7 @@ open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group af
 ## Key Technical Decisions
 
 ### claude-open-cursor
-Gets the active iTerm session's TTY → parent shell CWD via `lsof -a -d cwd` → opens `.code-workspace` or folder in Cursor.
+Gets the active iTerm session's TTY → finds the Claude process on that TTY → gets its CWD via `lsof -a -d cwd` (= project root) → opens matching `.code-workspace` or folder in Cursor via `open -a "Cursor"`.
 
 ### Session detection
 Sessions from `~/.claude/projects/**/*.jsonl`, classified by last meaningful message type (`assistant` = idle, `user` = processing). Fresh sessions (no real user messages) excluded. See [docs/session-detection.md](docs/session-detection.md).
@@ -44,6 +46,7 @@ Three layers: `SUB_CLAUDE=1` env var, `meta.json` session IDs, and `-tmp-`/`tmp.
 - **`lsof` needs `-a` flag** for AND logic when combining `-d` and `-p`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#lsof-gotchas).
 - **Bash 3.2** — no associative arrays, no `trap RETURN`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#bash-32-compatibility).
 - **Keyboard Maestro** — `.kmmacros` must be wrapped in a MacroGroup. See [docs/keyboard-maestro.md](docs/keyboard-maestro.md).
+- **`cursor` CLI breaks paths with spaces** — its `use_cursor_cli` uses `eval "$CURSOR_CLI" "$@"` which re-splits arguments. Use `open -a "Cursor"` instead.
 
 ## Known Limitations
 
