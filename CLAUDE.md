@@ -7,8 +7,7 @@ A keyboard shortcut that always brings you to the next Claude Code session waiti
 ## Architecture
 
 - `bin/claude-next-idle` — cycles through idle Claude sessions (LIFO stack)
-- `bin/claude-open-cursor` — opens Cursor at the project dir of the active iTerm2 session
-- `km/open-cursor-from-iterm.kmmacros` — KM macro: opens Cursor from active iTerm2 session
+- `km/open-cursor-from-iterm.kmmacros` — KM macro: opens Cursor from active iTerm2 session (calls `claude-open-cursor` from dotfiles)
 - State files in `~/.claude/` (idle-stack, lock dir)
 - Debug log at `~/claude-next-idle.log` (only with `--debug`)
 
@@ -24,9 +23,6 @@ open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group af
 - Once tested, merge the logic into the existing "VS code" macro: wrap its actions in an outer "If iTerm2 is active" condition.
 
 ## Key Technical Decisions
-
-### claude-open-cursor
-Gets the active iTerm session's TTY → finds the Claude process on that TTY → gets its CWD via `lsof -a -d cwd` (= project root) → opens matching `.code-workspace` or folder in Cursor via `open -a "Cursor"`.
 
 ### Session detection
 Sessions from `~/.claude/projects/**/*.jsonl`, classified by last meaningful message type (`assistant` = idle, `user` = processing). Fresh sessions (no real user messages) excluded. See [docs/session-detection.md](docs/session-detection.md).
@@ -46,7 +42,7 @@ Three layers: `SUB_CLAUDE=1` env var, `meta.json` session IDs, and `-tmp-`/`tmp.
 - **`lsof` needs `-a` flag** for AND logic when combining `-d` and `-p`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#lsof-gotchas).
 - **Bash 3.2** — no associative arrays, no `trap RETURN`. See [docs/macos-pitfalls.md](docs/macos-pitfalls.md#bash-32-compatibility).
 - **Keyboard Maestro** — `.kmmacros` must be wrapped in a MacroGroup. See [docs/keyboard-maestro.md](docs/keyboard-maestro.md).
-- **`cursor` CLI breaks paths with spaces** — its `use_cursor_cli` uses `eval "$CURSOR_CLI" "$@"` which re-splits arguments. Use `open -a "Cursor"` instead.
+
 
 ## Known Limitations
 
