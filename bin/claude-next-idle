@@ -241,32 +241,13 @@ rotate_to_bottom() {
 
 # --- navigation ---
 
-# Detect which app hosts the session: "cursor", "iterm", or "unknown"
+# Detect which app hosts the session: "iterm", "cursor", or "unknown"
+# iTerm is checked first — Claude sessions run there; Cursor windows just have
+# the project name in their editor title bar, which would cause false matches.
 detect_session_app() {
     local cwd="$1"
     local project_name
     project_name=$(basename "$cwd")
-
-    local cursor_match
-    cursor_match=$(osascript - "$project_name" <<'AS' 2>/dev/null || true
-on run argv
-    set pn to item 1 of argv
-    tell application "System Events"
-        if not (exists process "Cursor") then return "no"
-        tell process "Cursor"
-            repeat with w in windows
-                if name of w contains pn then return "yes"
-            end repeat
-        end tell
-    end tell
-    return "no"
-end run
-AS
-)
-    if [ "$cursor_match" = "yes" ]; then
-        echo "cursor"
-        return
-    fi
 
     local iterm_match
     iterm_match=$(osascript - "$project_name" <<'AS' 2>/dev/null || true
@@ -290,6 +271,27 @@ AS
 )
     if [ "$iterm_match" = "yes" ]; then
         echo "iterm"
+        return
+    fi
+
+    local cursor_match
+    cursor_match=$(osascript - "$project_name" <<'AS' 2>/dev/null || true
+on run argv
+    set pn to item 1 of argv
+    tell application "System Events"
+        if not (exists process "Cursor") then return "no"
+        tell process "Cursor"
+            repeat with w in windows
+                if name of w contains pn then return "yes"
+            end repeat
+        end tell
+    end tell
+    return "no"
+end run
+AS
+)
+    if [ "$cursor_match" = "yes" ]; then
+        echo "cursor"
         return
     fi
 
