@@ -22,9 +22,12 @@ claude_pid="$PPID"
 signal_file="$SIGNAL_DIR/$claude_pid"
 
 # Read hook input from stdin (JSON with session_id, transcript_path, etc.)
-# Only available for some events; non-blocking read with timeout.
+# Note: async hooks receive JSON without a trailing newline, causing `read`
+# to return exit code 1 despite capturing the data. Use `|| true` to handle this.
 read_input() {
-    if read -t 1 -r line 2>/dev/null; then
+    local line=""
+    read -t 1 -r line 2>/dev/null || true
+    if [ -n "$line" ]; then
         echo "$line"
         cat 2>/dev/null
     fi
