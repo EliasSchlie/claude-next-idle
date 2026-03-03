@@ -17,19 +17,8 @@ set -euo pipefail
 SIGNAL_DIR="$HOME/.claude/idle-signals"
 mkdir -p "$SIGNAL_DIR"
 
-# Find the ancestor claude process
-find_claude_pid() {
-    local p=$$
-    while [ "$p" -gt 1 ] 2>/dev/null; do
-        local comm
-        comm=$(ps -o comm= -p "$p" 2>/dev/null) || return 1
-        [ "$comm" = "claude" ] && { echo "$p"; return 0; }
-        p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-    done
-    return 1
-}
-
-claude_pid=$(find_claude_pid) || exit 0
+# $PPID is the Claude process that spawned this hook
+claude_pid="$PPID"
 signal_file="$SIGNAL_DIR/$claude_pid"
 
 # Read hook input from stdin (JSON with session_id, transcript_path, etc.)
