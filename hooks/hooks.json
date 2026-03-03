@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.local/share/claude-next-idle/hooks/idle-signal.sh write stop",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.local/share/claude-next-idle/hooks/idle-signal.sh write tool",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.local/share/claude-next-idle/hooks/idle-signal.sh write permission",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.local/share/claude-next-idle/hooks/idle-signal.sh clear",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.local/share/claude-next-idle/hooks/idle-signal.sh clear",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

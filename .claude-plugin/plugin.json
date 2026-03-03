@@ -1,0 +1,10 @@
+{
+  "name": "claude-next-idle",
+  "description": "Detects idle Claude sessions for keyboard-shortcut cycling",
+  "version": "1.0.0",
+  "author": {
+    "name": "Elias Schlie"
+  },
+  "repository": "https://github.com/EliasSchlie/claude-next-idle",
+  "license": "MIT"
+}
