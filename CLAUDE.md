@@ -24,12 +24,12 @@ claude plugin install claude-next-idle@elias-tools
 
 ## Releasing
 
-After pushing changes, bump the version in **both** places for auto-update:
+```bash
+./release.sh        # auto-increments patch (1.0.1 → 1.0.2)
+./release.sh 2.0.0  # explicit version
+```
 
-1. `.claude-plugin/plugin.json` — `version` field (in this repo)
-2. `EliasSchlie/claude-plugins` marketplace — `version` in `.claude-plugin/marketplace.json`
-
-Push both repos. The marketplace has `autoUpdate: true`, so new sessions pick up the new version automatically.
+Bumps version in both `.claude-plugin/plugin.json` and the `EliasSchlie/claude-plugins` marketplace, commits, and pushes both repos. The marketplace has `autoUpdate: true`, so new sessions pick up changes automatically. **Always run this after pushing code changes.**
 
 ## Key Technical Decisions
 
