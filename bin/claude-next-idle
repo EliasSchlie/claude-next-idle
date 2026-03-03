@@ -322,22 +322,22 @@ end run
 APPLESCRIPT
 }
 
-activate_iterm_session() {
-    local project_name="$1"
-    log "activating iTerm session for: $project_name"
+activate_iterm_by_tty() {
+    local tty_dev="$1"
+    log "activating iTerm session by TTY: $tty_dev"
 
-    # iTerm has proper AppleScript support — bring matching window/tab to front
-    osascript - "$project_name" <<'APPLESCRIPT' 2>/dev/null
+    osascript - "$tty_dev" <<'APPLESCRIPT' 2>/dev/null
 on run argv
-    set projectName to item 1 of argv
+    set ttyDev to item 1 of argv
     tell application "iTerm"
         activate
         repeat with w in windows
             repeat with t in tabs of w
                 repeat with s in sessions of t
-                    if name of s contains projectName or name of s contains "claude" then
+                    if tty of s is ttyDev then
                         set index of w to 1
                         select t
+                        select s
                         return "found"
                     end if
                 end repeat
@@ -349,11 +349,46 @@ end run
 APPLESCRIPT
 }
 
+# Find TTY of a live claude process matching this CWD
+find_tty_for_cwd() {
+    local target_cwd="$1"
+    for pid in $(pgrep -x claude 2>/dev/null); do
+        local ppid parent_comm
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$ppid" ] || [ "$ppid" = "1" ] && continue
+        parent_comm=$(ps -o comm= -p "$ppid" 2>/dev/null)
+        case "$parent_comm" in
+            *zsh*|*bash*|*fish*|*sh) ;;
+            *) continue ;;
+        esac
+        local pwd_val
+        pwd_val=$(ps eww -p "$pid" 2>/dev/null | grep -o 'PWD=[^ ]*' | head -1 | cut -d= -f2)
+        if [ "$pwd_val" = "$target_cwd" ]; then
+            ps -o tty= -p "$pid" 2>/dev/null | tr -d ' '
+            return
+        fi
+    done
+}
+
 navigate_to_session() {
     local cwd="$1"
     local project_name
     project_name=$(basename "$cwd")
 
+    # Try iTerm by TTY first (most reliable — matches exact terminal)
+    local tty
+    tty=$(find_tty_for_cwd "$cwd")
+    if [ -n "$tty" ]; then
+        log "found TTY $tty for project: $project_name"
+        local result
+        result=$(activate_iterm_by_tty "/dev/$tty")
+        if [ "$result" = "found" ]; then
+            echo "found"
+            return
+        fi
+    fi
+
+    # Fallback: detect by project name in window/session titles
     local app
     app=$(detect_session_app "$cwd")
     log "detected app: $app for project: $project_name"
@@ -363,7 +398,27 @@ navigate_to_session() {
             activate_cursor_window "$project_name"
             ;;
         iterm)
-            activate_iterm_session "$project_name"
+            # Name-based iTerm activation (legacy fallback)
+            osascript - "$project_name" <<'APPLESCRIPT' 2>/dev/null
+on run argv
+    set projectName to item 1 of argv
+    tell application "iTerm"
+        activate
+        repeat with w in windows
+            repeat with t in tabs of w
+                repeat with s in sessions of t
+                    if name of s contains projectName then
+                        set index of w to 1
+                        select t
+                        return "found"
+                    end if
+                end repeat
+            end repeat
+        end repeat
+    end tell
+    return "not_found"
+end run
+APPLESCRIPT
             ;;
         *)
             log "no matching window found in Cursor or iTerm"
