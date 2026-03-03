@@ -23,10 +23,12 @@ Noise types get appended AFTER the assistant finishes responding, so they must b
 
 ### Status Classification
 
-The last meaningful message type determines status:
+The last meaningful message type + real-user presence determines status:
 
-- `assistant` → **idle** (Claude responded, waiting for user)
-- `user` → **processing** (user sent message, Claude working)
+- `assistant` + has real user → **idle** (Claude responded, waiting for user)
+- `assistant` + no real user → **fresh** (new or cleared session, excluded from stack)
+- `user` + has real user → **processing** (user sent message, Claude working)
+- `user` + no real user → **fresh** (e.g., right after `/clear` before first real message)
 
 ### CWD Extraction
 
@@ -37,6 +39,10 @@ The `cwd` field appears in early JSONL entries (first 30 lines). It tracks Claud
 A session is "fresh" if it has no real user messages. System-generated `type=user` entries have content starting with `<` (e.g., `<local-command-caveat>`, `<command-name>`). These are filtered out — only entries with content NOT starting with `<` (or content that is a list) count as real user messages.
 
 Fresh sessions are excluded from the idle rotation stack.
+
+### `/clear` Handling
+
+`/clear` creates a **new JSONL** file. The old file retains all messages but loses its live process (same PID now writes to the new file). The new file starts with only system-generated `type=user` entries (`<command-name>/clear</command-name>`, etc.), so `has_real_user` is false → status is **fresh** until the user sends their first real message.
 
 ## Process Matching
 

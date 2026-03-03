@@ -265,7 +265,7 @@ for session_id, last_type, cwd, has_real_user, mtime in sessions:
     if last_type == "assistant":
         status = "idle" if has_real_user else "fresh"
     elif last_type == "user":
-        status = "processing"
+        status = "processing" if has_real_user else "fresh"
     else:
         continue
 
