@@ -7,7 +7,7 @@
 #        idle-signal.sh clear
 #
 # Signal files: ~/.claude/idle-signals/<claude-pid>
-# Format: {"cwd":"...","session_id":"...","transcript":"...","ts":...}
+# Format: {"cwd":"...","session_id":"...","transcript":"...","ts":...,"trigger":"..."}
 
 set -euo pipefail
 
