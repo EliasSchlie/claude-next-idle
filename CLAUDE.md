@@ -7,20 +7,16 @@ A keyboard shortcut that always brings you to the next Claude Code session waiti
 ## Architecture
 
 - `bin/claude-next-idle` — cycles through idle Claude sessions (LIFO stack)
-- `km/open-cursor-from-iterm.kmmacros` — KM macro: opens Cursor from active iTerm2 session (calls `claude-open-cursor` from dotfiles)
 - State files in `~/.claude/` (idle-stack, lock dir)
 - Debug log at `~/claude-next-idle.log` (only with `--debug`)
 
 ## Installation
 
 ```bash
-./install.sh                            # symlinks bin/* → ~/.local/bin/
-open km/open-cursor-from-iterm.kmmacros  # imports KM macro (enable the group after import)
+./install.sh    # symlinks bin/* → ~/.local/bin/
 ```
 
 - `install.sh` symlinks scripts into `~/.local/bin/`. Safe to re-run. Not managed by dotfiles `deploy.sh`.
-- After importing the KM macro, enable its macro group in KM Editor.
-- Once tested, merge the logic into the existing "VS code" macro: wrap its actions in an outer "If iTerm2 is active" condition.
 
 ## Key Technical Decisions
 
