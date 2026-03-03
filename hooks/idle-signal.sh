@@ -41,8 +41,9 @@ case "${1:-}" in
             transcript=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null) || true
         fi
 
-        printf '{"cwd":"%s","session_id":"%s","transcript":"%s","ts":%s,"trigger":"%s"}\n' \
-            "$(pwd)" "$session_id" "$transcript" "$(date +%s)" "$trigger" > "$signal_file"
+        jq -n --arg cwd "$(pwd)" --arg sid "$session_id" --arg tr "$transcript" \
+            --argjson ts "$(date +%s)" --arg trig "$trigger" \
+            '{cwd:$cwd,session_id:$sid,transcript:$tr,ts:$ts,trigger:$trig}' > "$signal_file"
 
         # Block detection (Stop only): wait, then verify the session didn't continue.
         # Another Stop hook may have blocked → Claude gets re-prompted → not idle.

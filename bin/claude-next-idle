@@ -70,9 +70,11 @@ get_idle_sessions() {
             continue
         fi
 
-        # Parse signal metadata
-        cwd=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('cwd',''))" < "$signal_file" 2>/dev/null) || true
-        ts=$(python3 -c "import json,sys; print(json.load(sys.stdin).get('ts',0))" < "$signal_file" 2>/dev/null) || true
+        # Parse signal metadata (single python3 call for both fields)
+        local parsed
+        parsed=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('cwd','')+'|'+str(d.get('ts',0)))" < "$signal_file" 2>/dev/null) || true
+        cwd="${parsed%|*}"
+        ts="${parsed##*|}"
 
         [ -z "$cwd" ] && continue
         log "idle signal: PID=$pid CWD=$cwd TS=$ts"
