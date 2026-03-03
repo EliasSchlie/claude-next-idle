@@ -27,7 +27,7 @@ Format: `{"cwd":"...","session_id":"...","transcript":"...","ts":...,"trigger":"
 | `UserPromptSubmit` | Clear signal | User sent a new message |
 | `SessionStart` (clear) | Clear signal | User ran `/clear` |
 
-All hooks are async. The hook script (`hooks/idle-signal.sh`) finds the ancestor `claude` process by walking up the PPID chain.
+All hooks are async. The hook script uses `$PPID` (set to the Claude process that spawned the hook).
 
 Note: `/clear` does NOT trigger `UserPromptSubmit` — it triggers `SessionStart` with source `clear`.
 

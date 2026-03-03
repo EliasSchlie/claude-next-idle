@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Signals when a Claude session becomes idle or starts processing.
 # Called by Claude Code hooks (Stop, PreToolUse, PermissionRequest,
-# PostToolUse, UserPromptSubmit).
+# PostToolUse, UserPromptSubmit, SessionStart).
 #
 # Usage: idle-signal.sh write [stop|tool|permission]
 #        idle-signal.sh clear
