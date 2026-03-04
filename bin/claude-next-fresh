@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# LIFO stack for cycling through fresh (empty-prompt) Claude Code sessions.
+#
+# Model:
+#   - Fresh sessions are detected via hook-written signal files
+#     (~/.claude/fresh-signals/<pid>), NOT by parsing JSONL files.
+#   - Hooks: SessionStart → write fresh signal. UserPromptSubmit → clear.
+#   - A "fresh" session is one at an empty prompt: just started or just /clear'd.
+#   - Sub-claude sessions never write signals (hook checks SUB_CLAUDE=1)
+#
+# Usage:
+#   claude-next-fresh              # Jump to next fresh session (top of stack)
+#   claude-next-fresh --list       # Show the full stack
+#   claude-next-fresh --count      # Print fresh session count
+#   claude-next-fresh --reset      # Clear stack ordering
+#   claude-next-fresh --debug      # Jump with verbose logging to ~/claude-next-fresh.log
+
+set -euo pipefail
+
+# Ensure tools are available regardless of how the script is launched (KM, cron, etc.)
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+
+STACK_FILE="$HOME/.claude/fresh-stack"
+LOCK_DIR="$HOME/.claude/fresh-stack.lock"
+SIGNAL_DIR="$HOME/.claude/fresh-signals"
+LOG_FILE="$HOME/claude-next-fresh.log"
+DEBUG=0
+
+# --- shared libs ---
+
+# Resolve symlinks so sourcing works from ~/.local/bin/ symlinks
+_self="$0"; [ -L "$_self" ] && _self=$(readlink "$_self")
+SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
+# shellcheck source=../lib/stack.sh
+. "$SCRIPT_DIR/../lib/stack.sh"
+# shellcheck source=../lib/navigate.sh
+. "$SCRIPT_DIR/../lib/navigate.sh"
+
+# --- main ---
+
+parse_flags "$@"
+init_debug "claude-next-fresh"
+acquire_lock
+
+sessions=$(get_sessions)
+session_count=$(echo "$sessions" | grep -c '|' 2>/dev/null) || session_count=0
+log "totals: fresh=$session_count"
+
+rebuild_stack "$sessions"
+
+case "$MODE" in
+    --list)
+        echo "Fresh (empty prompt):"
+        print_stack_list
+        exit 0
+        ;;
+    --count)
+        echo "$session_count"
+        exit 0
+        ;;
+    --reset)
+        rm -f "$STACK_FILE"
+        echo "Stack cleared."
+        exit 0
+        ;;
+esac
+
+# Default: jump to top of stack
+if ! jump_to_top " fresh"; then
+    log "no fresh sessions to jump to"
+    echo "No fresh sessions."
+    afplay /System/Library/Sounds/Tink.aiff 2>/dev/null &
+fi

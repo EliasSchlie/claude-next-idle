@@ -2,15 +2,20 @@
 
 ## Goal
 
-A keyboard shortcut that always brings you to the next Claude Code session waiting for your input. Each press cycles to the next one (LIFO — most recently finished first). Entering a session moves it to the back of the queue. Only truly idle sessions qualify: no fresh/unstarted sessions, no cleared sessions, no sessions still processing, no sessions whose terminal has been closed.
+Two keyboard shortcuts for navigating Claude Code sessions:
+- **`claude-next-idle`** — jump to the next session waiting for your input (LIFO). Only truly idle sessions: no fresh, no cleared, no processing.
+- **`claude-next-fresh`** — jump to the next fresh/cleared session (empty prompt, nothing typed yet).
 
 ## Architecture
 
-- `hooks/idle-signal.sh` — hook script that writes/clears signal files when sessions become idle/active
+- `hooks/idle-signal.sh` — hook script that writes/clears signal files when sessions become idle/active/fresh
 - `hooks/hooks.json` — Claude Code hook configuration (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, SessionStart)
-- `bin/claude-next-idle` — reads signal files, maintains LIFO stack, navigates to top session
-- State: `~/.claude/idle-signals/<pid>` (hook-written), `~/.claude/idle-stack` (stack ordering)
-- Debug log at `~/claude-next-idle.log` (only with `--debug`)
+- `lib/navigate.sh` — shared AppleScript navigation functions (iTerm TTY, Cursor window)
+- `bin/claude-next-idle` — reads idle signal files, maintains LIFO stack, navigates to top session
+- `bin/claude-next-fresh` — reads fresh signal files, maintains LIFO stack, navigates to top session
+- Idle state: `~/.claude/idle-signals/<pid>` (hook-written), `~/.claude/idle-stack` (stack ordering)
+- Fresh state: `~/.claude/fresh-signals/<pid>` (hook-written), `~/.claude/fresh-stack` (stack ordering)
+- Debug logs at `~/claude-next-idle.log` and `~/claude-next-fresh.log` (only with `--debug`)
 
 ## Installation
 
@@ -39,8 +44,11 @@ Hooks fire on lifecycle events to write/clear signal files (`~/.claude/idle-sign
 ### Block detection
 Stop hook waits 1s then checks if the JSONL transcript was modified — if so, another hook blocked and the session continued (not idle). Signal is removed.
 
-### Cleared-session exclusion
-`/clear` does NOT trigger `UserPromptSubmit` — it triggers `SessionStart` with source `clear`. A `SessionStart` hook with matcher `clear` clears the signal so cleared sessions don't appear idle.
+### Cleared-session exclusion (from idle)
+`/clear` does NOT trigger `UserPromptSubmit` — it triggers `SessionStart` with source `clear`. A `SessionStart` hook with matcher `clear` clears the idle signal so cleared sessions don't appear idle.
+
+### Fresh session detection
+`SessionStart` (no matcher) fires on every session start (new or `/clear`) and writes a fresh signal (`~/.claude/fresh-signals/<pid>`). `UserPromptSubmit` clears both idle and fresh signals. See [docs/session-detection.md](docs/session-detection.md).
 
 ### Sub-claude exclusion
 Hook checks `SUB_CLAUDE=1` env var and exits early. No sub-claude session ever writes a signal.

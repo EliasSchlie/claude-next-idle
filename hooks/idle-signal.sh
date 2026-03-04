@@ -5,8 +5,12 @@
 #
 # Usage: idle-signal.sh write [stop|tool|permission]
 #        idle-signal.sh clear
+#        idle-signal.sh clear-all
+#        idle-signal.sh write-fresh
+#        idle-signal.sh clear-fresh
 #
-# Signal files: ~/.claude/idle-signals/<claude-pid>
+# Signal files: ~/.claude/idle-signals/<claude-pid>   (idle sessions)
+#               ~/.claude/fresh-signals/<claude-pid>  (fresh/cleared sessions)
 # Format: {"cwd":"...","session_id":"...","transcript":"...","ts":...,"trigger":"..."}
 
 set -euo pipefail
@@ -15,11 +19,13 @@ set -euo pipefail
 [ "${SUB_CLAUDE:-}" = "1" ] && exit 0
 
 SIGNAL_DIR="$HOME/.claude/idle-signals"
-mkdir -p "$SIGNAL_DIR"
+FRESH_DIR="$HOME/.claude/fresh-signals"
+mkdir -p "$SIGNAL_DIR" "$FRESH_DIR"
 
 # $PPID is the Claude process that spawned this hook
 claude_pid="$PPID"
 signal_file="$SIGNAL_DIR/$claude_pid"
+fresh_file="$FRESH_DIR/$claude_pid"
 
 # Read hook input from stdin (JSON with session_id, transcript_path, etc.)
 # Note: async hooks receive JSON without a trailing newline, causing `read`
@@ -64,5 +70,15 @@ case "${1:-}" in
         ;;
     clear)
         rm -f "$signal_file"
+        ;;
+    clear-all)
+        rm -f "$signal_file" "$fresh_file"
+        ;;
+    write-fresh)
+        jq -n --arg cwd "$(pwd)" --argjson ts "$(date +%s)" \
+            '{cwd:$cwd,ts:$ts}' > "$fresh_file"
+        ;;
+    clear-fresh)
+        rm -f "$fresh_file"
         ;;
 esac

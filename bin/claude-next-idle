@@ -28,59 +28,17 @@ SIGNAL_DIR="$HOME/.claude/idle-signals"
 LOG_FILE="$HOME/claude-next-idle.log"
 DEBUG=0
 
-# --- logging ---
+# --- shared libs ---
 
-log() {
-    [ "$DEBUG" -eq 0 ] && return
-    echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
-}
+# Resolve symlinks so sourcing works from ~/.local/bin/ symlinks
+_self="$0"; [ -L "$_self" ] && _self=$(readlink "$_self")
+SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
+# shellcheck source=../lib/stack.sh
+. "$SCRIPT_DIR/../lib/stack.sh"
+# shellcheck source=../lib/navigate.sh
+. "$SCRIPT_DIR/../lib/navigate.sh"
 
-# --- locking (mkdir-based, works on macOS bash 3.2) ---
-
-acquire_lock() {
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        local lock_age
-        lock_age=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
-        if [ "$lock_age" -gt 30 ]; then
-            rm -rf "$LOCK_DIR" && mkdir "$LOCK_DIR" 2>/dev/null || exit 0
-        else
-            log "BLOCKED: another instance holds the lock (age=${lock_age}s)"
-            exit 0
-        fi
-    fi
-    trap 'rm -rf "$LOCK_DIR"' EXIT
-}
-
-# --- session detection (signal-file based) ---
-
-# Read idle sessions from signal files. Output: pid|cwd|ts per idle session.
-# Each signal file is ~/.claude/idle-signals/<pid> written by hooks.
-# Stale signals (dead PIDs) are cleaned up.
-get_idle_sessions() {
-    mkdir -p "$SIGNAL_DIR"
-    for signal_file in "$SIGNAL_DIR"/*; do
-        [ -f "$signal_file" ] || continue
-        local pid cwd ts
-        pid=$(basename "$signal_file")
-
-        # Verify PID is still alive and is a claude process
-        if ! ps -o comm= -p "$pid" 2>/dev/null | grep -qx "claude"; then
-            log "cleaning stale signal: PID=$pid (dead)"
-            rm -f "$signal_file"
-            continue
-        fi
-
-        # Parse signal metadata (single python3 call for both fields)
-        local parsed
-        parsed=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('cwd','')+'|'+str(d.get('ts',0)))" < "$signal_file" 2>/dev/null) || true
-        cwd="${parsed%|*}"
-        ts="${parsed##*|}"
-
-        [ -z "$cwd" ] && continue
-        log "idle signal: PID=$pid CWD=$cwd TS=$ts"
-        echo "${pid}|${cwd}|${ts}"
-    done
-}
+# --- idle-specific: processing session detection ---
 
 # Count processing sessions: alive claude PIDs that are NOT idle and NOT sub-claude.
 get_processing_sessions() {
@@ -102,282 +60,25 @@ get_processing_sessions() {
     done
 }
 
-# --- stack management ---
-
-# Stack file format: pid|cwd|ts
-rebuild_stack() {
-    local idle_sessions="$1"
-    local tmp_idle tmp_stack_pids tmp_new
-    tmp_idle=$(mktemp)
-    tmp_stack_pids=$(mktemp)
-    tmp_new=$(mktemp)
-
-    echo "$idle_sessions" | grep -v '^$' > "$tmp_idle" || true
-    log "idle sessions found: $(wc -l < "$tmp_idle" | tr -d ' ')"
-
-    # Preserve ordering of sessions already in the stack (keyed by PID)
-    local kept_lines=""
-    if [ -f "$STACK_FILE" ]; then
-        while IFS='|' read -r pid _rest; do
-            [ -z "$pid" ] && continue
-            if grep -q "^${pid}|" "$tmp_idle" 2>/dev/null; then
-                local fresh_data
-                fresh_data=$(grep "^${pid}|" "$tmp_idle" | head -1)
-                kept_lines="${kept_lines}${fresh_data}"$'\n'
-                echo "$pid" >> "$tmp_stack_pids"
-            fi
-        done < "$STACK_FILE"
-    fi
-
-    # New sessions not yet in the stack
-    while IFS='|' read -r pid cwd ts; do
-        [ -z "$pid" ] && continue
-        if ! grep -qxF "$pid" "$tmp_stack_pids" 2>/dev/null; then
-            echo "${ts}|${pid}|${cwd}|${ts}" >> "$tmp_new"
-        fi
-    done < "$tmp_idle"
-
-    # Stack = new sessions (sorted by ts desc, at top) + existing sessions (preserved order)
-    {
-        sort -t'|' -k1 -rn "$tmp_new" 2>/dev/null | while IFS='|' read -r _sort_ts pid cwd ts; do
-            [ -z "$pid" ] && continue
-            echo "${pid}|${cwd}|${ts}"
-        done
-        printf '%s' "$kept_lines"
-    } | grep -v '^$' > "$STACK_FILE" || true
-
-    rm -f "$tmp_idle" "$tmp_stack_pids" "$tmp_new"
-    log "stack rebuilt: $(wc -l < "$STACK_FILE" | tr -d ' ') entries"
-}
-
-rotate_to_bottom() {
-    local target="$1"
-    local tmp
-    tmp=$(mktemp)
-    grep -v "^${target}|" "$STACK_FILE" > "$tmp" 2>/dev/null || true
-    grep "^${target}|" "$STACK_FILE" >> "$tmp" 2>/dev/null || true
-    mv "$tmp" "$STACK_FILE"
-}
-
-# --- navigation ---
-
-# Detect which app hosts the session: "iterm", "cursor", or "unknown"
-# iTerm checked first — Claude sessions run there; Cursor windows match
-# project name in their editor title bar, which would cause false matches.
-detect_session_app() {
-    local cwd="$1"
-    local project_name
-    project_name=$(basename "$cwd")
-
-    local iterm_match
-    iterm_match=$(osascript - "$project_name" <<'AS' 2>/dev/null || true
-on run argv
-    set pn to item 1 of argv
-    tell application "System Events"
-        if not (exists process "iTerm2") then return "no"
-    end tell
-    tell application "iTerm"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if name of s contains pn then return "yes"
-                end repeat
-            end repeat
-        end repeat
-    end tell
-    return "no"
-end run
-AS
-)
-    if [ "$iterm_match" = "yes" ]; then
-        echo "iterm"
-        return
-    fi
-
-    local cursor_match
-    cursor_match=$(osascript - "$project_name" <<'AS' 2>/dev/null || true
-on run argv
-    set pn to item 1 of argv
-    tell application "System Events"
-        if not (exists process "Cursor") then return "no"
-        tell process "Cursor"
-            repeat with w in windows
-                if name of w contains pn then return "yes"
-            end repeat
-        end tell
-    end tell
-    return "no"
-end run
-AS
-)
-    if [ "$cursor_match" = "yes" ]; then
-        echo "cursor"
-        return
-    fi
-
-    echo "unknown"
-}
-
-activate_cursor_window() {
-    local project_name="$1"
-    log "activating Cursor window for: $project_name"
-
-    osascript - "$project_name" <<'APPLESCRIPT' 2>/dev/null
-on run argv
-    set projectName to item 1 of argv
-    tell application "System Events"
-        tell process "Cursor"
-            set frontmost to true
-            repeat with w in windows
-                if name of w contains projectName then
-                    perform action "AXRaise" of w
-                    return "found"
-                end if
-            end repeat
-            return "not_found"
-        end tell
-    end tell
-end run
-APPLESCRIPT
-}
-
-activate_iterm_by_tty() {
-    local tty_dev="$1"
-    log "activating iTerm session by TTY: $tty_dev"
-
-    osascript - "$tty_dev" <<'APPLESCRIPT' 2>/dev/null
-on run argv
-    set ttyDev to item 1 of argv
-    tell application "iTerm"
-        activate
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if tty of s is ttyDev then
-                        set index of w to 1
-                        select t
-                        select s
-                        return "found"
-                    end if
-                end repeat
-            end repeat
-        end repeat
-    end tell
-    return "not_found"
-end run
-APPLESCRIPT
-}
-
-navigate_to_session() {
-    local cwd="$1"
-    local pid="$2"
-    local project_name
-    project_name=$(basename "$cwd")
-
-    # Try iTerm by TTY first (most reliable — matches exact terminal session)
-    if [ -n "$pid" ]; then
-        local tty
-        tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-        if [ -n "$tty" ] && [ "$tty" != "??" ]; then
-            log "found TTY $tty for PID $pid (project: $project_name)"
-            local result
-            result=$(activate_iterm_by_tty "/dev/$tty")
-            if [ "$result" = "found" ]; then
-                echo "found"
-                return
-            fi
-        fi
-    fi
-
-    # Fallback: detect by project name in window/session titles
-    local app
-    app=$(detect_session_app "$cwd")
-    log "detected app: $app for project: $project_name"
-
-    case "$app" in
-        cursor)
-            activate_cursor_window "$project_name"
-            ;;
-        iterm)
-            osascript - "$project_name" <<'APPLESCRIPT' 2>/dev/null
-on run argv
-    set projectName to item 1 of argv
-    tell application "iTerm"
-        activate
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if name of s contains projectName then
-                        set index of w to 1
-                        select t
-                        return "found"
-                    end if
-                end repeat
-            end repeat
-        end repeat
-    end tell
-    return "not_found"
-end run
-APPLESCRIPT
-            ;;
-        *)
-            log "no matching window found in Cursor or iTerm"
-            echo "not_found"
-            ;;
-    esac
-}
-
 # --- main ---
 
-# Parse flags
-MODE=""
-for arg in "$@"; do
-    case "$arg" in
-        --debug) DEBUG=1 ;;
-        --list|--count|--reset) MODE="$arg" ;;
-    esac
-done
-
-if [ "$DEBUG" -eq 1 ]; then
-    echo "=== claude-next-idle debug $(date) ===" >> "$LOG_FILE"
-    log "PATH=$PATH"
-    log "python3=$(which python3 2>/dev/null || echo MISSING)"
-    log "osascript=$(which osascript 2>/dev/null || echo MISSING)"
-fi
-
+parse_flags "$@"
+init_debug "claude-next-idle"
 acquire_lock
 
-idle_sessions=$(get_idle_sessions)
-idle_pids=$(echo "$idle_sessions" | awk -F'|' '{print $1}' | grep -v '^$' || true)
+sessions=$(get_sessions)
+idle_pids=$(echo "$sessions" | awk -F'|' '{print $1}' | grep -v '^$' || true)
 processing_sessions=$(get_processing_sessions "$idle_pids")
-idle_count=$(echo "$idle_sessions" | grep -c '|' 2>/dev/null) || idle_count=0
+session_count=$(echo "$sessions" | grep -c '|' 2>/dev/null) || session_count=0
 processing_count=$(echo "$processing_sessions" | grep -c '|' 2>/dev/null) || processing_count=0
-log "totals: idle=$idle_count processing=$processing_count"
+log "totals: idle=$session_count processing=$processing_count"
 
-rebuild_stack "$idle_sessions"
+rebuild_stack "$sessions"
 
 case "$MODE" in
     --list)
         echo "Idle (review stack):"
-        pos=1
-        if [ -f "$STACK_FILE" ]; then
-            # Detect duplicate project names for disambiguation
-            dup_names=$(while IFS='|' read -r _pid cwd _ts; do
-                basename "$cwd" 2>/dev/null
-            done < "$STACK_FILE" | sort | uniq -d)
-
-            while IFS='|' read -r pid cwd _ts; do
-                [ -z "$pid" ] && continue
-                project=$(basename "$cwd")
-                if echo "$dup_names" | grep -qxF "$project" 2>/dev/null; then
-                    printf "  %2d. %s (PID %s)\n" "$pos" "$project" "$pid"
-                else
-                    printf "  %2d. %s\n" "$pos" "$project"
-                fi
-                pos=$((pos + 1))
-            done < "$STACK_FILE"
-        fi
-        [ "$((pos - 1))" -eq 0 ] && echo "  (none)"
+        print_stack_list
         echo ""
         echo "Processing:"
         if [ "$processing_count" -gt 0 ]; then
@@ -391,7 +92,7 @@ case "$MODE" in
         exit 0
         ;;
     --count)
-        echo "${idle_count}/${processing_count}"
+        echo "${session_count}/${processing_count}"
         exit 0
         ;;
     --reset)
@@ -402,27 +103,8 @@ case "$MODE" in
 esac
 
 # Default: jump to top of stack
-top=$(head -1 "$STACK_FILE" 2>/dev/null || true)
-if [ -z "$top" ]; then
+if ! jump_to_top ", ${processing_count} processing"; then
     log "no idle sessions to jump to"
     echo "No idle sessions.  (${processing_count} processing)"
     afplay /System/Library/Sounds/Tink.aiff 2>/dev/null &
-    exit 0
-fi
-
-IFS='|' read -r pid cwd _ts <<< "$top"
-project=$(basename "$cwd")
-log "jumping to: $project (PID=$pid)"
-
-rotate_to_bottom "$pid"
-
-result=$(navigate_to_session "$cwd" "$pid")
-remaining=$(grep -c '|' "$STACK_FILE" 2>/dev/null) || remaining=0
-remaining=$((remaining - 1))
-
-if [ "$result" = "found" ]; then
-    echo "→ $project  ($remaining more, ${processing_count} processing)"
-else
-    log "FAILED: window not found for $project"
-    echo "→ $project  [not found]  ($remaining more, ${processing_count} processing)"
 fi
