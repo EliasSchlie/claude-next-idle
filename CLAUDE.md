@@ -29,12 +29,16 @@ claude plugin install claude-next-idle@elias-tools
 
 ## Releasing
 
-```bash
-./release.sh        # auto-increments patch (1.0.1 → 1.0.2)
-./release.sh 2.0.0  # explicit version
-```
+**Automatic (CI):** Every push to `main` triggers `.github/workflows/auto-release.yml`:
+1. Bumps patch version in `.claude-plugin/plugin.json`
+2. Commits with `[skip ci]` to prevent loops
+3. Updates version in `EliasSchlie/claude-plugins` marketplace, pushes
 
-Bumps version in both `.claude-plugin/plugin.json` and the `EliasSchlie/claude-plugins` marketplace, commits, and pushes both repos. The marketplace has `autoUpdate: true`, so new sessions pick up changes automatically. **Always run this after pushing code changes.**
+Just push your changes — CI handles version bumping and marketplace sync. For major/minor bumps, manually update `plugin.json` before pushing; CI increments from your number.
+
+**Required secrets:** `APP_ID` and `APP_PRIVATE_KEY` — from the "Plugin Release Bot" GitHub App (installed on `claude-next-idle` + `claude-plugins`).
+
+**Manual fallback:** `./release.sh` still works for local releases if CI is unavailable.
 
 ## Key Technical Decisions
 
