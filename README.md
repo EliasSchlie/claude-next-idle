@@ -2,7 +2,7 @@
 
 **Jump to the next Claude Code session that needs your attention.**
 
-When you run multiple Claude Code sessions in parallel, keeping track of which ones are waiting for you becomes impossible. `claude-next-idle` solves this with a LIFO stack — press a keyboard shortcut to instantly jump to the most recently finished session. Press again for the next one.
+When you run multiple Claude Code sessions in parallel, keeping track of which ones are waiting for you becomes impossible. `claude-next-idle` solves this with a LIFO stack - press a keyboard shortcut to instantly jump to the most recently finished session. Press again for the next one.
 
 It also includes `claude-next-fresh` for jumping to empty sessions ready for new work.
 
@@ -14,7 +14,7 @@ You visit it     → moves to BOTTOM of stack
 You type in it   → leaves the stack (now active)
 ```
 
-Idle detection is powered by [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) — no JSONL parsing, no polling. Hooks fire on lifecycle events (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, SessionStart) and write/clear lightweight signal files.
+Idle detection is powered by [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) - no JSONL parsing, no polling. Hooks fire on lifecycle events (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, SessionStart) and write/clear lightweight signal files.
 
 ## Install
 
@@ -63,16 +63,16 @@ claude-next-fresh --count     # Print fresh session count
 
 ```
 hooks/
-  idle-signal.sh    — hook script: writes/clears signal files on session events
-  hooks.json        — Claude Code hook configuration
+  idle-signal.sh    - hook script: writes/clears signal files on session events
+  hooks.json        - Claude Code hook configuration
 
 bin/
-  claude-next-idle  — reads idle signals, maintains LIFO stack, navigates
-  claude-next-fresh — reads fresh signals, maintains LIFO stack, navigates
+  claude-next-idle  - reads idle signals, maintains LIFO stack, navigates
+  claude-next-fresh - reads fresh signals, maintains LIFO stack, navigates
 
 lib/
-  navigate.sh       — shared AppleScript navigation (iTerm TTY, Cursor window)
-  stack.sh          — shared LIFO stack logic
+  navigate.sh       - shared AppleScript navigation (iTerm TTY, Cursor window)
+  stack.sh          - shared LIFO stack logic
 ```
 
 **Signal files** live at `~/.claude/idle-signals/<pid>` and `~/.claude/fresh-signals/<pid>`. They contain JSON with the session's CWD, session ID, and timestamp.
@@ -81,10 +81,10 @@ lib/
 
 ## Key Design Decisions
 
-- **Hook-based detection** — no JSONL parsing or polling. Hooks fire on lifecycle events and write signal files instantly.
-- **Block detection** — Stop hook waits 1s and checks if the transcript was modified by another hook. Prevents false idle signals when lint hooks block responses.
-- **Sub-claude exclusion** — sessions with `SUB_CLAUDE=1` env var never write signals, so automated sub-agent sessions don't pollute the stack.
-- **Cleared-session exclusion** — `/clear` triggers `SessionStart`, not `UserPromptSubmit`. A dedicated hook clears idle signals for cleared sessions.
+- **Hook-based detection** - no JSONL parsing or polling. Hooks fire on lifecycle events and write signal files instantly.
+- **Block detection** - Stop hook waits 1s and checks if the transcript was modified by another hook. Prevents false idle signals when lint hooks block responses.
+- **Sub-claude exclusion** - sessions with `SUB_CLAUDE=1` env var never write signals, so automated sub-agent sessions don't pollute the stack.
+- **Cleared-session exclusion** - `/clear` triggers `SessionStart`, not `UserPromptSubmit`. A dedicated hook clears idle signals for cleared sessions.
 
 ## Requirements
 
@@ -101,4 +101,4 @@ lib/
 
 ## License
 
-[MIT](LICENSE) — Elias Schlie
+[MIT](LICENSE) - Elias Schlie
