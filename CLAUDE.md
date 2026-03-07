@@ -27,19 +27,6 @@ claude plugin install claude-next-idle@elias-tools
 ./install.sh    # symlinks bin/* → ~/.local/bin/
 ```
 
-## Releasing
-
-**Automatic (CI):** Every push to `main` triggers `.github/workflows/auto-release.yml`:
-1. Bumps patch version in `.claude-plugin/plugin.json`
-2. Commits with `[skip ci]` to prevent loops
-3. Updates version in `EliasSchlie/claude-plugins` marketplace, pushes
-
-Just push your changes — CI handles version bumping and marketplace sync. For major/minor bumps, manually update `plugin.json` before pushing; CI increments from your number.
-
-**Required secrets:** `APP_ID` and `APP_PRIVATE_KEY` — from the "Plugin Release Bot" GitHub App (installed on `claude-next-idle` + `claude-plugins`).
-
-**Manual fallback:** `./release.sh` still works for local releases if CI is unavailable.
-
 ## Key Technical Decisions
 
 ### Hook-based idle detection
