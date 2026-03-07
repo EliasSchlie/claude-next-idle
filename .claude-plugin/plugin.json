@@ -1,7 +1,7 @@
 {
   "name": "claude-next-idle",
   "description": "Detects idle Claude sessions for keyboard-shortcut cycling",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "author": {
     "name": "Elias Schlie"
   },
