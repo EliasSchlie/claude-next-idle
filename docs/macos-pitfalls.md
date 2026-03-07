@@ -24,7 +24,7 @@ No known workaround for `pgrep`. The root cause is unknown (not a permissions is
 
 ```bash
 # Bad — matches OLDPWD too!
-# "OLDPWD=/Users/mee" contains substring "PWD=/Users/mee"
+# "OLDPWD=/Users/yourname" contains substring "PWD=/Users/yourname"
 pwd=$(echo "$line" | grep -o 'PWD=[^ ]*' | head -1 | cut -d= -f2)
 
 # Good — requires space before PWD, excluding OLDPWD
@@ -35,11 +35,11 @@ The space-before-PWD pattern works because `OLDPWD` is preceded by a space befor
 
 ### PWD vs Project Directory
 
-PWD may not match the JSONL project directory. Claude Code can determine the project independently of the launch CWD (e.g., session resume). The shell might be in `/Users/mee` while Claude's project is `/Users/mee/Documents/Projects/foo`.
+PWD may not match the JSONL project directory. Claude Code can determine the project independently of the launch CWD (e.g., session resume). The shell might be in `/Users/yourname` while Claude's project is `/Users/yourname/projects/foo`.
 
 ### Paths With Spaces
 
-`ps eww` env vars are space-separated with no escaping. A PWD like `/Users/mee/My Projects/foo` would be truncated to `/Users/mee/My`. No reliable fix using `ps eww` alone — use `lsof -a -d cwd` on the parent shell PID as an alternative.
+`ps eww` env vars are space-separated with no escaping. A PWD like `/Users/yourname/My Projects/foo` would be truncated to `/Users/yourname/My`. No reliable fix using `ps eww` alone — use `lsof -a -d cwd` on the parent shell PID as an alternative.
 
 ## lsof Gotchas
 

@@ -1,57 +1,104 @@
 # claude-next-idle
 
-LIFO stack for cycling through idle Claude Code sessions. Jump to the next session waiting for your review.
+**Jump to the next Claude Code session that needs your attention.**
 
-## How it works
+When you run multiple Claude Code sessions in parallel, keeping track of which ones are waiting for you becomes impossible. `claude-next-idle` solves this with a LIFO stack — press a keyboard shortcut to instantly jump to the most recently finished session. Press again for the next one.
 
-When you run multiple Claude Code sessions in parallel, `claude-next-idle` tracks which ones are idle (waiting for input) and which are processing. Press a keyboard shortcut to jump to the most recently finished session. Press again for the next one.
+It also includes `claude-next-fresh` for jumping to empty sessions ready for new work.
+
+## How It Works
 
 ```
 Session finishes → enters TOP of stack
 You visit it     → moves to BOTTOM of stack
-You type in it   → leaves the stack (now processing)
+You type in it   → leaves the stack (now active)
 ```
+
+Idle detection is powered by [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) — no JSONL parsing, no polling. Hooks fire on lifecycle events (Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit, SessionStart) and write/clear lightweight signal files.
 
 ## Install
 
+### Plugin (hooks)
+
 ```bash
-# Copy to PATH
-cp bin/claude-next-idle ~/.local/bin/
-chmod +x ~/.local/bin/claude-next-idle
+claude plugin install claude-next-idle@elias-tools
 ```
 
-Then set up a [Keyboard Maestro](https://www.keyboardmaestro.com/) macro that runs:
+This installs the hooks that track session state. The plugin auto-updates when new versions are published.
+
+### CLI tools
+
+```bash
+git clone https://github.com/EliasSchlie/claude-next-idle.git
+cd claude-next-idle
+./install.sh    # symlinks bin/* → ~/.local/bin/
+```
+
+### Keyboard shortcut
+
+Set up a [Keyboard Maestro](https://www.keyboardmaestro.com/) macro (or any hotkey tool) that runs:
+
 ```bash
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 claude-next-idle --debug 2>&1
 ```
-And shows the result as a notification.
+
+Show the result as a notification so you get feedback ("Jumped to project-name" / "No idle sessions").
 
 ## Usage
 
 ```bash
 claude-next-idle              # Jump to next idle session
-claude-next-idle --list       # Show idle stack + processing sessions
-claude-next-idle --count      # Print "idle/processing" counts (e.g. "3/1")
+claude-next-idle --list       # Show idle stack + active sessions
+claude-next-idle --count      # Print "idle/active" counts (e.g. "3/1")
 claude-next-idle --reset      # Clear stack ordering
-claude-next-idle --debug      # Jump with verbose logging to ~/claude-next-idle.log
+claude-next-idle --debug      # Jump with verbose logging
+
+claude-next-fresh             # Jump to next fresh/empty session
+claude-next-fresh --list      # Show fresh sessions
+claude-next-fresh --count     # Print fresh session count
 ```
+
+## Architecture
+
+```
+hooks/
+  idle-signal.sh    — hook script: writes/clears signal files on session events
+  hooks.json        — Claude Code hook configuration
+
+bin/
+  claude-next-idle  — reads idle signals, maintains LIFO stack, navigates
+  claude-next-fresh — reads fresh signals, maintains LIFO stack, navigates
+
+lib/
+  navigate.sh       — shared AppleScript navigation (iTerm TTY, Cursor window)
+  stack.sh          — shared LIFO stack logic
+```
+
+**Signal files** live at `~/.claude/idle-signals/<pid>` and `~/.claude/fresh-signals/<pid>`. They contain JSON with the session's CWD, session ID, and timestamp.
+
+**Navigation** resolves PID → TTY → iTerm session (via AppleScript). Falls back to project-name matching in Cursor window titles.
+
+## Key Design Decisions
+
+- **Hook-based detection** — no JSONL parsing or polling. Hooks fire on lifecycle events and write signal files instantly.
+- **Block detection** — Stop hook waits 1s and checks if the transcript was modified by another hook. Prevents false idle signals when lint hooks block responses.
+- **Sub-claude exclusion** — sessions with `SUB_CLAUDE=1` env var never write signals, so automated sub-agent sessions don't pollute the stack.
+- **Cleared-session exclusion** — `/clear` triggers `SessionStart`, not `UserPromptSubmit`. A dedicated hook clears idle signals for cleared sessions.
 
 ## Requirements
 
-- macOS (uses AppleScript, `stat -f`, `pgrep`, `lsof`)
+- macOS (uses AppleScript for terminal navigation)
 - Bash 3.2+ (ships with macOS)
-- Python 3 (for JSONL parsing)
-- Claude Code (reads `~/.claude/projects/**/*.jsonl`)
+- Python 3 (for JSON parsing in hooks)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with hooks support
+- iTerm2 or Cursor (for terminal navigation)
 
-## Sub-claude exclusion
+## Known Limitations
 
-Sessions spawned by [sub-claude](https://github.com/EliasSchlie/sub-claude) are automatically excluded via:
-- `SUB_CLAUDE=1` environment variable on running processes
-- Session IDs from `~/.sub-claude/pools/*/jobs/*/meta.json`
-- Temp directory patterns in JSONL paths
+- **Cursor**: raises the correct window but cannot switch to a specific terminal tab (would need a VS Code extension)
+- **Block detection latency**: 1s verification window means a session briefly appears idle before block detection completes
 
-## Limitations
+## License
 
-- **Raises the correct Cursor/iTerm window** but cannot switch to a specific terminal tab within Cursor (would need a VS Code extension)
-- macOS only
+[MIT](LICENSE) — Elias Schlie
