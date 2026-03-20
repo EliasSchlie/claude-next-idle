@@ -45,6 +45,8 @@ claude-next-idle --debug 2>&1
 
 Show the result as a notification so you get feedback ("Jumped to project-name" / "No idle sessions").
 
+**Tip:** `--count` is handy for a status bar widget — it prints `idle/active` (e.g. `3/1`) with no side effects.
+
 ## Usage
 
 ```bash
